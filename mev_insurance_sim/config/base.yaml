@@ -1,0 +1,107 @@
+simulation:
+  seed: 42
+  duration_days: 180
+  time_step: "1d"
+  n_runs: 1
+
+blockchain:
+  infura_url: "wss://mainnet.infura.io/ws/v3/YOUR_KEY"
+  blocks_to_fetch: 50000
+  dex_contracts:
+    uniswap_v2: "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
+    uniswap_v3: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
+    sushiswap: "0xC0AEe478e3658e2610c5F7A4A2E1777cE9e4f2Ac"
+
+market:
+  insurance_rate: 0.50
+  loss_pct_mean: 0.20
+  loss_pct_std: 0.02
+  patt_oscillation_range: 0.02
+
+users:
+  initial_count: 500
+  growth_rate_daily: 0.02
+  fraud_rate: 0.05
+  fraud_strategy: "mixed"
+  swap_frequency_mean: 3
+  coverage_distribution:
+    low: 0.33
+    medium: 0.34
+    high: 0.33
+
+pool:
+  initial_balance_eth: 100.0
+  mbase: 0.20
+  solvency_thresholds:
+    high_risk: 1.3
+    medium_risk: 1.5
+  madj:
+    high_risk: 0.10
+    medium_risk: 0.05
+    healthy: 0.00
+
+tiers:
+  bronze:
+    max_capital_eth: 1.0
+    max_daily_swaps: 3
+    fraud_score_base: 50
+  silver:
+    max_capital_eth: 5.0
+    max_daily_swaps: 3
+    fraud_score_base: 30
+  gold:
+    max_capital_eth: 20.0
+    max_daily_swaps: 4
+    fraud_score_base: 15
+  platinum:
+    stake_pct: 0.20
+    fraud_score_base: 0
+  upgrades:
+    bronze_to_silver:
+      min_swaps: 18
+      min_days: 30
+      max_avg_fraud_score: 52
+    silver_to_gold:
+      min_swaps: 55
+      min_days: 60
+      max_avg_fraud_score: 35
+
+fraud_detection:
+  user_fraud_rate: 0.05
+  oracle_dishonest_rate: 0.10
+  false_negative_rate: 0.20
+  claim_rate_thresholds:
+    very_suspicious: 0.30
+    suspicious_high: 0.20
+    suspicious_med: 0.10
+    normal: 0.06
+  fraud_score_decision:
+    auto_approve: 60
+    captcha_low: 60
+    captcha_high: 80
+    auto_reject: 80
+  network_bfs_scores:
+    distance_1: 50
+    distance_2: 30
+    distance_3: 15
+    no_path: 0
+
+oracles:
+  initial_count: 20
+  honest_rate: 0.90
+  availability_rate: 0.95
+  n_selected_per_claim: 5
+  stake_min_eth: 2.0
+  reward_per_claim_eth: 0.005
+  reward_patt_update_eth: 0.002
+  reward_captcha_eth: 0.001
+  watchlist:
+    entry_divergences: 2
+    divergence_threshold: 10
+    persistence_months: 3
+  slashing:
+    contestation_stake_eth: 0.1
+    distribution:
+      pool: 0.60
+      reporter: 0.25
+      jury: 0.15

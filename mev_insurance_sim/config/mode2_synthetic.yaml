@@ -1,0 +1,18 @@
+# Mode 2 overrides: Full synthetic simulation with real Patt baseline
+simulation:
+  seed: 42
+  duration_days: 180
+
+market:
+  patt_oscillation_range: 0.02
+
+users:
+  initial_count: 500
+  growth_rate_daily: 0.02
+  fraud_rate: 0.05
+  fraud_strategy: "mixed"
+  swap_frequency_mean: 3
+  coverage_distribution:
+    low: 0.33
+    medium: 0.34
+    high: 0.33
