@@ -67,6 +67,17 @@ POOL_ADDRESSES: Dict[str, List[str]] = {
 CHUNK_SIZE     = 2000
 BLOCKS_PER_DAY = 6646
 
+# Converti tutti gli indirizzi pool in checksum format (richiesto da eth_getLogs Infura)
+def _checksum_pool_addresses(addrs_map: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    try:
+        from web3 import Web3
+        return {dex: [Web3.to_checksum_address(a) for a in addrs]
+                for dex, addrs in addrs_map.items()}
+    except ImportError:
+        return addrs_map
+
+POOL_ADDRESSES = _checksum_pool_addresses(POOL_ADDRESSES)
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS swaps (
     block_number INTEGER,
@@ -154,6 +165,7 @@ def fetch_dex_events(
     dex_targets: List[str],
     cache_dir: str = "cache",
     progress_cb=None,
+    force_refresh: bool = False,
 ) -> dict:
     """
     Scarica eventi Swap usando eth_getLogs (chunk da 2000 blocchi).
@@ -164,7 +176,7 @@ def fetch_dex_events(
     dex_key    = "_".join(sorted(d.replace(" ", "") for d in dex_targets))
     cache_file = os.path.join(cache_dir, f"dex_events_{days}d_{dex_key}.pkl")
 
-    if os.path.isfile(cache_file):
+    if os.path.isfile(cache_file) and not force_refresh:
         age_h = (time.time() - os.path.getmtime(cache_file)) / 3600
         if age_h < 23:
             logger.info(f"Cache ({age_h:.1f}h fa) — skip fetch")

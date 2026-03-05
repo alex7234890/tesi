@@ -1042,6 +1042,7 @@ with tab_infura:
                     dex_targets=_dex_targets,
                     cache_dir=_cache_path_dir,
                     progress_cb=_cb,
+                    force_refresh=True,
                 )
                 _save_db(_result, _DB_PATH)
                 _progress_bar.progress(100, text="Completato!")
