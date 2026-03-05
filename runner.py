@@ -118,6 +118,10 @@ def run_single(
     prev_total_payouts:        float = 0.0
     prev_total_oracle_rewards: float = 0.0
 
+    # Breakdown tracking
+    breakdown_event: dict | None = None
+    already_broken: bool = False
+
     # -----------------------------------------------------------------
     # Main simulation loop
     # -----------------------------------------------------------------
@@ -238,6 +242,43 @@ def run_single(
         if sr < 1.0:
             logger.error(f"Day {day}: POOL INSOLVENT — SR={sr:.3f}")
 
+        # ---- Breakdown detection ----
+        if not already_broken:
+            _bal   = pool.balance_eth
+            _pend  = pool.pending_liabilities_eth
+            _prem  = pool.total_premiums_eth
+            _pays  = pool.total_payouts_eth
+            if sr < 1.0:
+                breakdown_event = {
+                    "day": day,
+                    "reason": "SR < 1.0 — pool insolvente",
+                    "sr": sr,
+                    "pool_balance": _bal,
+                    "pending_liabilities": _pend,
+                }
+                already_broken = True
+            elif _bal <= 0:
+                breakdown_event = {
+                    "day": day,
+                    "reason": "Saldo pool esaurito",
+                    "sr": 0.0,
+                    "pool_balance": _bal,
+                    "pending_liabilities": _pend,
+                }
+                already_broken = True
+            elif _prem > 0 and _pays > _prem * 1.5:
+                breakdown_event = {
+                    "day": day,
+                    "reason": (
+                        f"Payout totali ({_pays:.2f} ETH) superano "
+                        f"1.5× i premi ({_prem:.2f} ETH)"
+                    ),
+                    "sr": sr,
+                    "pool_balance": _bal,
+                    "pending_liabilities": _pend,
+                }
+                already_broken = True
+
         prev_tint  = today_tint
         prev_vbase = max(len(swaps), 1)
 
@@ -269,6 +310,8 @@ def run_single(
 
     logger.info("Simulation complete.")
     summary = collector.summary(pool)
+    summary["breakdown_event"] = breakdown_event
+    summary["pool_survived"]   = breakdown_event is None
     return collector, pool, summary
 
 
