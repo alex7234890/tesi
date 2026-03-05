@@ -263,6 +263,10 @@ def fetch_dex_events(
     swaps            = _parse_logs_to_swaps(all_logs, target_map, block_ts_map)
     sandwich_attacks = _detect_sandwiches(swaps)
 
+    total_sw  = len(swaps)
+    total_atk = len(sandwich_attacks)
+    patt_value = total_atk / max(total_sw, 1)
+
     result = {
         "swaps": swaps,
         "sandwich_attacks": sandwich_attacks,
@@ -271,8 +275,9 @@ def fetch_dex_events(
             "start_block":       start_block,
             "end_block":         latest_block,
             "days":              days,
-            "total_swaps":       len(swaps),
-            "total_sandwiches":  len(sandwich_attacks),
+            "total_swaps":       total_sw,
+            "total_sandwiches":  total_atk,
+            "patt_value":        patt_value,
             "infura_calls_used": infura_calls,
             "dex_targets":       dex_targets,
         },
