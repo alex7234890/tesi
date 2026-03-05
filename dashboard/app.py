@@ -90,6 +90,7 @@ coverage_label = st.sidebar.selectbox(
     help="Bassa → 50% rimborso, Fcov=0.70 | Media → 70%, Fcov=0.90 | Alta → 100%, Fcov=1.00",
 )
 coverage = _COVERAGE_INTERNAL[coverage_label]
+fcov     = _COVERAGE_FCOV[coverage_label]
 
 omit_oracle_fraud = st.sidebar.toggle(
     "Ometti frodi oracle (simulazione semplificata)",
