@@ -54,6 +54,19 @@ for _k, _v in [
         st.session_state[_k] = _v
 
 
+def _db_swap_count() -> int:
+    """Restituisce il numero di swap nel DB locale (0 se assente o vuoto)."""
+    if not os.path.isfile(_DB_PATH):
+        return 0
+    try:
+        con = sqlite3.connect(_DB_PATH, check_same_thread=False)
+        n = con.execute("SELECT COUNT(*) FROM swaps").fetchone()[0]
+        con.close()
+        return int(n)
+    except Exception:
+        return 0
+
+
 # =========================================================================
 # SIDEBAR
 # =========================================================================
@@ -70,6 +83,17 @@ mode = st.sidebar.radio(
 )
 is_mode1 = mode == 1
 is_mode2 = mode == 2
+
+# Stato DB per Mode 1 — visibile subito dopo la selezione modalità
+if is_mode1:
+    _n_swaps = _db_swap_count()
+    if _n_swaps > 0:
+        st.sidebar.success(f"✅ DB Infura: {_n_swaps:,} swap disponibili")
+    else:
+        st.sidebar.error(
+            "⚠️ DB Infura vuoto — vai alla tab **🔗 Dati Infura** e scarica i dati "
+            "prima di avviare la simulazione Mode 1."
+        )
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### Parametri Simulazione")
@@ -509,6 +533,11 @@ if run_btn:
         t_sum = tier_bronze_pct + tier_silver_pct + tier_gold_pct + tier_platinum_pct
         if t_sum != 100:
             errors.append(f"La distribuzione tier somma a {t_sum}% invece di 100%.")
+    if is_mode1 and _db_swap_count() == 0:
+        errors.append(
+            "Il database Infura è vuoto. Vai alla tab **🔗 Dati Infura**, "
+            "inserisci la chiave API e scarica i dati reali prima di usare Mode 1."
+        )
 
     if errors:
         for e in errors:
@@ -583,7 +612,16 @@ with tab_sim:
     collectors = st.session_state["collectors"]
 
     if not results:
-        st.info("Configura i parametri nella sidebar e premi **▶ Avvia Simulazione** per cominciare.")
+        if is_mode1 and _db_swap_count() == 0:
+            st.warning(
+                "**Mode 1 selezionato ma il database Infura è vuoto.**\n\n"
+                "1. Vai alla tab **🔗 Dati Infura**\n"
+                "2. Inserisci la chiave API Infura nel pannello **Parametri Mode 1** nella sidebar\n"
+                "3. Clicca **🔄 Scarica dati ora**\n"
+                "4. Torna qui e premi **▶ Avvia Simulazione**"
+            )
+        else:
+            st.info("Configura i parametri nella sidebar e premi **▶ Avvia Simulazione** per cominciare.")
     else:
         first_label     = next(iter(results))
         first_df        = results[first_label]
