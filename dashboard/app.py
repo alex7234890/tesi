@@ -983,6 +983,12 @@ with tab_infura:
     if preview_btn and db_exists:
         try:
             con = sqlite3.connect(_DB_PATH, check_same_thread=False)
+            try:
+                from download_blocks import _DDL as _DB_DDL
+                con.executescript(_DB_DDL)
+                con.commit()
+            except Exception:
+                pass
             prev_df = pd.read_sql("SELECT * FROM swaps LIMIT 50", con)
             con.close()
             st.markdown("**Primi 50 swap nel database locale:**")
@@ -997,6 +1003,14 @@ with tab_infura:
         st.markdown("### Dettaglio Dati Scaricati")
         try:
             con = sqlite3.connect(_DB_PATH, check_same_thread=False)
+            # Applica lo schema (no-op se le tabelle esistono già)
+            sys.path.insert(0, os.path.join(_ROOT, "scripts"))
+            try:
+                from download_blocks import _DDL as _DB_DDL
+                con.executescript(_DB_DDL)
+                con.commit()
+            except Exception:
+                pass
             total_swaps = con.execute("SELECT COUNT(*) FROM swaps").fetchone()[0]
             min_block   = con.execute("SELECT MIN(block_number) FROM swaps").fetchone()[0] or 0
             max_block   = con.execute("SELECT MAX(block_number) FROM swaps").fetchone()[0] or 0
