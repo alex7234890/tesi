@@ -61,6 +61,7 @@ for _k, _v in [
     ("last_mode", 2), ("confirm_clear_cache", False),
     ("infura_download_log", ""),
     ("infura_api_key", _read_infura_key_from_config()),
+    ("infura_patt_value", None),
 ]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -385,6 +386,12 @@ def _build_config(
     # La chiave Infura è già nel config caricato da base.yaml
     # (gestita e salvata dalla tab Dati Infura)
 
+    # Per Mode 1: usa patt_value calcolato dall'ultimo download Infura
+    if mode == 1:
+        _patt_override = st.session_state.get("infura_patt_value")
+        if _patt_override is not None and _patt_override > 0:
+            cfg.setdefault("market", {})["attack_rate"] = float(_patt_override)
+
     return cfg
 
 
@@ -448,7 +455,11 @@ def render_riepilogo(p: dict) -> str:
     oracle_str = "disabilitate (modalità semplificata)" if p["omit_oracle_fraud"] else "attive"
 
     if p["mode"] == 1:
-        patt_src = "dati reali da Infura (cache o fetch live)"
+        _pv = st.session_state.get("infura_patt_value")
+        if _pv is not None and _pv > 0:
+            patt_src = f"dati reali da Infura — **Patt = {_pv:.2%}** (sandwich/swap)"
+        else:
+            patt_src = "dati reali da Infura (scarica i dati nella tab Dati Infura)"
     else:
         patt_exists = os.path.isfile(os.path.join(_ROOT, p["patt_file_path"]))
         patt_src = f"file CSV `{p['patt_file_path']}`" if patt_exists else "sintetico ~5% ±2%"
@@ -591,8 +602,8 @@ if export_btn and st.session_state["results"]:
 # =========================================================================
 st.title("🛡️ MEV Insurance Protocol Simulator")
 
-tab_sim, tab_infura, tab_istr = st.tabs(
-    ["📊 Simulazione", "🔗 Dati Infura", "📖 Istruzioni"]
+tab_sim, tab_infura, tab_stress, tab_istr = st.tabs(
+    ["📊 Simulazione", "🔗 Dati Infura", "🔬 Stress Test", "📖 Istruzioni"]
 )
 
 # ==========================================================================
@@ -924,6 +935,109 @@ with tab_sim:
         with st.expander("📊 Dati grezzi simulazione", expanded=False):
             st.dataframe(first_df, use_container_width=True)
 
+        st.markdown("---")
+        st.subheader("📁 Tutti i Dati")
+
+        with st.expander("📋 Tutti i parametri usati in questa simulazione", expanded=False):
+            _p = _all_params()
+            _param_rows = [
+                ("Modalità", "Mode 1 — Dati Reali" if _p["mode"] == 1 else "Mode 2 — Sintetica"),
+                ("Durata (giorni)", _p["duration_days"]),
+                ("Copertura", f"{_p['coverage_label']} (Fcov={_COVERAGE_FCOV[_p['coverage_label']]:.2f})"),
+                ("Mbase", f"{_p['mbase']:.2%}"),
+                ("L% (perdita media)", f"{_p['loss_pct']:.2%}"),
+                ("E (FNR)", f"{_p['false_negative_rate']:.2%}"),
+                ("Soglia SR Alta", _p['sr_threshold_high']),
+                ("Soglia SR Media", _p['sr_threshold_med']),
+                ("Saldo iniziale pool (ETH)", _p['initial_pool_balance']),
+                ("Reward oracle/claim (ETH)", _p['oracle_reward_claim']),
+                ("Reward CAPTCHA (ETH)", _p['captcha_reward']),
+                ("N oracle", _p['n_oracles']),
+                ("Oracle per claim", _p['n_oracles_per_claim']),
+                ("Oracle per Patt", _p['n_oracles_patt']),
+                ("Soglia divergenza watchlist", _p['divergence_threshold']),
+                ("Divergenze per watchlist", _p['entry_divergences']),
+                ("Mesi persistenza watchlist", _p['watchlist_months']),
+                ("Stake min oracle (ETH)", _p['oracle_stake_min']),
+                ("Slashing pool %", _p['slash_pool_pct']),
+                ("Slashing reporter %", _p['slash_reporter_pct']),
+                ("Slashing jury %", _p['slash_jury_pct']),
+                ("FraudScore Bronze", _p['fs_bronze']),
+                ("FraudScore Silver", _p['fs_silver']),
+                ("FraudScore Gold", _p['fs_gold']),
+                ("FraudScore Platinum", _p['fs_platinum']),
+                ("Soglia auto-approvazione", _p['fs_auto_approve']),
+                ("Soglia CAPTCHA", _p['fs_captcha']),
+                ("Claim rate molto sospetta %", _p['cr_very_susp']),
+                ("Claim rate alta %", _p['cr_susp_high']),
+                ("Claim rate media %", _p['cr_susp_med']),
+                ("Bronze→Silver min swap", _p['b2s_swaps']),
+                ("Bronze→Silver min giorni", _p['b2s_days']),
+                ("Bronze→Silver max FraudScore", _p['b2s_maxfs']),
+                ("Silver→Gold min swap", _p['s2g_swaps']),
+                ("Silver→Gold min giorni", _p['s2g_days']),
+                ("Silver→Gold max FraudScore", _p['s2g_maxfs']),
+                ("Stake Platinum %", _p['pt_stake']),
+                ("Frodi oracle", "Disabilitate" if _p['omit_oracle_fraud'] else "Attive"),
+            ]
+            if _p["mode"] == 2:
+                _param_rows += [
+                    ("Swap/giorno", _p['swaps_per_day']),
+                    ("N utenti sintetici", _p['n_synthetic_users']),
+                    ("Tasso frode utenti", f"{_p['fraud_rate']:.1%}"),
+                    ("Seed RNG", _p['rng_seed']),
+                    ("Tier Bronze %", _p['tier_bronze_pct']),
+                    ("Tier Silver %", _p['tier_silver_pct']),
+                    ("Tier Gold %", _p['tier_gold_pct']),
+                    ("Tier Platinum %", _p['tier_platinum_pct']),
+                ]
+            if _p["mode"] == 1:
+                _patt_v = st.session_state.get("infura_patt_value")
+                if _patt_v is not None:
+                    _param_rows.append(("Patt da Infura", f"{_patt_v:.2%}"))
+            st.dataframe(
+                pd.DataFrame(_param_rows, columns=["Parametro", "Valore"]),
+                use_container_width=True, hide_index=True,
+            )
+
+        with st.expander("⬇️ Scarica serie storica completa (CSV)", expanded=False):
+            _csv_full = first_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Scarica CSV completo", data=_csv_full,
+                file_name="mev_simulazione_completa.csv", mime="text/csv",
+                key="csv_full_download",
+            )
+            st.caption(f"Serie storica: {len(first_df)} righe × {len(first_df.columns)} colonne")
+
+        with st.expander("📐 Dettaglio formula per giorno (campione)", expanded=False):
+            _fcov_v  = _COVERAGE_FCOV[coverage_label]
+            _rows_formula = []
+            for _, _fr in first_df.iterrows():
+                _day_v    = int(_fr["day"])
+                _patt_d   = float(_fr.get("patt_current", 0.05))
+                _madj_d   = float(_fr.get("madj_current", 0.0))
+                _l_pct    = loss_pct
+                _m_total  = mbase + _madj_d
+                _base     = _patt_d * _l_pct
+                _prem_ex  = _base * (1 + _m_total) * _fcov_v
+                _rows_formula.append({
+                    "Giorno": _day_v,
+                    "Patt": f"{_patt_d:.3%}",
+                    "L%": f"{_l_pct:.2%}",
+                    "Mbase+Madj": f"{_m_total:.2f}",
+                    "Fcov": f"{_fcov_v:.2f}",
+                    "P/V (esempio 1 ETH)": f"{_prem_ex:.5f} ETH",
+                    "SR": f"{float(_fr.get('solvency_ratio', 0)):.4f}",
+                })
+            st.dataframe(
+                pd.DataFrame(_rows_formula),
+                use_container_width=True, hide_index=True, height=300,
+            )
+            st.caption(
+                "P = V × (Patt × L%) × (1 + Mbase + Madj) × Fcov | "
+                "Tint=0 (caso base senza frodi non rilevate per semplicità)"
+            )
+
 
 # ==========================================================================
 # TAB 2 — DATI INFURA
@@ -1047,14 +1161,18 @@ with tab_infura:
                 _save_db(_result, _DB_PATH)
                 _progress_bar.progress(100, text="Completato!")
                 _meta = _result["metadata"]
+                _patt_v = _meta.get("patt_value", 0.0)
+                st.session_state["infura_patt_value"] = _patt_v
                 st.success(
                     f"✅ Completato: **{_meta['total_swaps']:,} swap**, "
-                    f"**{_meta['total_sandwiches']:,} sandwich** in "
+                    f"**{_meta['total_sandwiches']:,} sandwich** "
+                    f"(**Patt = {_patt_v:.2%}**) in "
                     f"**{_meta['infura_calls_used']} chiamate Infura**"
                 )
                 st.session_state["infura_download_log"] = (
                     f"{datetime.datetime.now().strftime('%d/%m/%Y %H:%M')} — "
-                    f"{_meta['total_swaps']} swap, {_meta['total_sandwiches']} sandwich"
+                    f"{_meta['total_swaps']} swap, {_meta['total_sandwiches']} sandwich, "
+                    f"Patt={_patt_v:.2%}"
                 )
                 st.rerun()
             except ImportError:
@@ -1135,11 +1253,13 @@ with tab_infura:
 
             def _fmts(t):
                 try:
-                    return datetime.datetime.utcfromtimestamp(t).strftime("%d/%m/%Y")
+                    return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%d/%m/%Y")
                 except Exception:
                     return "—"
 
             _patt_pct = _n_atk / max(_total_sw, 1) * 100
+            _patt_sess = st.session_state.get("infura_patt_value")
+            _patt_sess_str = f"{_patt_sess:.2%}" if _patt_sess is not None else "—"
             st.markdown(
                 f"| Campo | Valore |\n|---|---|\n"
                 f"| Ultimo aggiornamento DB | {_last_fetch_str} |\n"
@@ -1151,7 +1271,15 @@ with tab_infura:
                 f"| — Uniswap V3 | {_dex_cnt.get('uniswap_v3', 0):,} |\n"
                 f"| — Sushiswap | {_dex_cnt.get('sushiswap', 0):,} |\n"
                 f"| — Curve | {_dex_cnt.get('curve', 0):,} |\n"
-                f"| **Sandwich attacks** | **{_n_atk:,}** ({_patt_pct:.2f}% degli swap) |\n"
+                f"| **Sandwich attacks rilevati** | **{_n_atk:,}** ({_patt_pct:.2f}% degli swap) |\n"
+                f"| **Patt calcolato (da Infura)** | **{_patt_sess_str}** — usato nella simulazione Mode 1 |\n"
+            )
+            st.info(
+                "ℹ️ **Nota sulla precisione del rilevamento sandwich:** "
+                "Il rilevamento usa un algoritmo euristico (tripla frontrun/victim/backrun sullo stesso pool "
+                "in blocchi consecutivi). Non viene verificata l'identità del caller tramite `eth_getTransactionByHash`, "
+                "quindi il tasso di falsi positivi può essere elevato (sequenze di swap legittimi sul "
+                "medesimo pool vengono contati come sandwich). Il valore di Patt è indicativo."
             )
             if _total_sw == 0:
                 st.warning("Il DB esiste ma non contiene ancora swap. Clicca **🔄 Scarica dati ora**.")
@@ -1189,7 +1317,286 @@ blocchi consecutivi, tx_hash diversi.
 
 
 # ==========================================================================
-# TAB 3 — ISTRUZIONI
+# ==========================================================================
+# TAB 3 — STRESS TEST
+# ==========================================================================
+with tab_stress:
+    st.subheader("🔬 Stress Test — Analisi di Sensibilità")
+    st.caption(
+        "Esegui più simulazioni variando un parametro alla volta "
+        "per identificare i punti critici del protocollo."
+    )
+
+    _st_mode = st.session_state.get("last_mode", 2)
+
+    # ── 3a: Sweep parametro singolo ────────────────────────────────────────
+    st.markdown("### 3a — Sweep Parametro Singolo")
+    st.markdown(
+        "Varia un parametro in un intervallo e osserva come cambiano profitto, "
+        "Solvency Ratio e tasso di approvazione claim."
+    )
+
+    _sweep_params = {
+        "Patt (tasso attacco %)":         ("market", "attack_rate",      0.01, 0.30, 0.02, "percent"),
+        "L% (perdita media per attacco)": ("pool",   "loss_pct_mean",    0.05, 0.50, 0.05, "percent"),
+        "Mbase (margine base)":           ("pool",   "mbase",            0.05, 0.50, 0.05, "percent"),
+        "Saldo iniziale pool (ETH)":      ("pool",   "initial_balance_eth", 20, 500, 20, "number"),
+        "Durata simulazione (giorni)":    ("simulation", "duration_days", 10, 90, 10, "int"),
+    }
+
+    _sw_col1, _sw_col2 = st.columns(2)
+    with _sw_col1:
+        _sweep_param_label = st.selectbox(
+            "Parametro da variare", list(_sweep_params.keys()), key="stress_sweep_param"
+        )
+    with _sw_col2:
+        _sweep_n_steps = st.number_input(
+            "Numero di passi", min_value=3, max_value=20, value=8, step=1,
+            key="stress_sweep_steps"
+        )
+
+    _sp_section, _sp_key, _sp_min, _sp_max, _sp_step, _sp_type = _sweep_params[_sweep_param_label]
+    _sw_c1, _sw_c2 = st.columns(2)
+    with _sw_c1:
+        _sweep_min = st.number_input("Valore minimo", value=float(_sp_min), key="stress_min")
+    with _sw_c2:
+        _sweep_max = st.number_input("Valore massimo", value=float(_sp_max), key="stress_max")
+
+    if st.button("▶ Esegui Sweep", key="stress_sweep_run"):
+        import numpy as _np_s
+        _sweep_values = _np_s.linspace(_sweep_min, _sweep_max, int(_sweep_n_steps))
+        _sweep_results = []
+        _sw_prog = st.progress(0, text="Avvio sweep…")
+        for _i_sw, _val_sw in enumerate(_sweep_values):
+            _sw_prog.progress(int(_i_sw / len(_sweep_values) * 100),
+                              text=f"Step {_i_sw+1}/{len(_sweep_values)}: {_sweep_param_label}={_val_sw:.4f}")
+            try:
+                _cfg_sw = _build_config(
+                    mode=_st_mode, duration_days=duration_days,
+                    swaps_per_day=swaps_per_day, coverage=coverage,
+                    mbase=mbase, loss_pct=loss_pct,
+                    false_negative_rate=false_negative_rate,
+                    sr_threshold_high=sr_threshold_high, sr_threshold_med=sr_threshold_med,
+                    oracle_reward_claim=oracle_reward_claim, captcha_reward=captcha_reward,
+                    initial_pool_balance=initial_pool_balance, rng_seed=rng_seed,
+                    n_synthetic_users=n_synthetic_users,
+                    tier_bronze_pct=tier_bronze_pct, tier_silver_pct=tier_silver_pct,
+                    tier_gold_pct=tier_gold_pct, tier_platinum_pct=tier_platinum_pct,
+                    fraud_rate=fraud_rate, omit_oracle_fraud=omit_oracle_fraud,
+                    n_oracles=n_oracles, n_oracles_per_claim=n_oracles_per_claim,
+                    divergence_threshold=divergence_threshold,
+                    entry_divergences=entry_divergences, watchlist_months=watchlist_months,
+                    oracle_stake_min=oracle_stake_min, slash_deposit=slash_deposit,
+                    slash_pool_pct=slash_pool_pct, slash_reporter_pct=slash_reporter_pct,
+                    slash_jury_pct=slash_jury_pct,
+                    fs_bronze=fs_bronze, fs_silver=fs_silver, fs_gold=fs_gold,
+                    fs_platinum=fs_platinum, fs_auto_approve=fs_auto_approve,
+                    fs_captcha=fs_captcha, cr_very_susp=cr_very_susp,
+                    cr_susp_high=cr_susp_high, cr_susp_med=cr_susp_med,
+                    b2s_swaps=b2s_swaps, b2s_days=b2s_days, b2s_maxfs=b2s_maxfs,
+                    s2g_swaps=s2g_swaps, s2g_days=s2g_days, s2g_maxfs=s2g_maxfs,
+                    pt_stake=pt_stake,
+                )
+                # Override parametro variato
+                _cfg_sw.setdefault(_sp_section, {})[_sp_key] = (
+                    int(_val_sw) if _sp_type == "int" else float(_val_sw)
+                )
+                _col_sw, _pool_sw, _sum_sw = run_single(
+                    _cfg_sw, mode=_st_mode, coverage=coverage, db_path=_DB_PATH,
+                )
+                _sweep_results.append({
+                    _sweep_param_label: round(float(_val_sw), 6),
+                    "Profitto (ETH)":        round(_sum_sw["total_profit_eth"], 4),
+                    "Solvency Ratio finale": round(_sum_sw["final_solvency_ratio"], 4),
+                    "Tasso approvazione":    round(_sum_sw["claim_approval_rate"], 4),
+                    "Pool sopravvissuto":    "SÌ" if _sum_sw["pool_survived"] else "NO",
+                })
+            except Exception as _e_sw:
+                _sweep_results.append({
+                    _sweep_param_label: round(float(_val_sw), 6),
+                    "Profitto (ETH)": "ERR", "Solvency Ratio finale": "ERR",
+                    "Tasso approvazione": "ERR", "Pool sopravvissuto": f"ERR: {_e_sw}",
+                })
+        _sw_prog.progress(100, text="Sweep completato!")
+        _sw_df = pd.DataFrame(_sweep_results)
+        st.dataframe(_sw_df, use_container_width=True, hide_index=True)
+
+        # Breakpoint detection: dove il pool smette di sopravvivere
+        _failures = _sw_df[_sw_df["Pool sopravvissuto"] == "NO"]
+        if not _failures.empty:
+            _break_val = _failures.iloc[0][_sweep_param_label]
+            st.warning(
+                f"⚠️ **Breakpoint rilevato:** il pool smette di sopravvivere quando "
+                f"**{_sweep_param_label} ≥ {_break_val}**"
+            )
+        else:
+            st.success("✅ Il pool sopravvive per tutti i valori testati.")
+
+    st.markdown("---")
+
+    # ── 3b: Griglia 2D ─────────────────────────────────────────────────────
+    st.markdown("### 3b — Griglia 2D (due parametri)")
+    st.caption(
+        "Genera una matrice di profitti/SR variando due parametri contemporaneamente."
+    )
+
+    _grid_params_list = [
+        "Patt (tasso attacco %)",
+        "L% (perdita media per attacco)",
+        "Mbase (margine base)",
+        "Saldo iniziale pool (ETH)",
+    ]
+    _gc1, _gc2 = st.columns(2)
+    with _gc1:
+        _grid_param_x = st.selectbox("Parametro asse X", _grid_params_list, index=0, key="stress_grid_x")
+        _grid_x_min = st.number_input("X min", value=float(_sweep_params[_grid_param_x][2]), key="stress_gx_min")
+        _grid_x_max = st.number_input("X max", value=float(_sweep_params[_grid_param_x][3]), key="stress_gx_max")
+        _grid_x_steps = st.number_input("X passi", min_value=2, max_value=8, value=4, step=1, key="stress_gx_steps")
+    with _gc2:
+        _grid_param_y = st.selectbox("Parametro asse Y", _grid_params_list, index=1, key="stress_grid_y")
+        _grid_y_min = st.number_input("Y min", value=float(_sweep_params[_grid_param_y][2]), key="stress_gy_min")
+        _grid_y_max = st.number_input("Y max", value=float(_sweep_params[_grid_param_y][3]), key="stress_gy_max")
+        _grid_y_steps = st.number_input("Y passi", min_value=2, max_value=8, value=4, step=1, key="stress_gy_steps")
+
+    _grid_metric = st.selectbox(
+        "Metrica da mostrare", ["Profitto (ETH)", "Solvency Ratio finale", "Tasso approvazione"],
+        key="stress_grid_metric"
+    )
+
+    if st.button("▶ Esegui Griglia 2D", key="stress_grid_run"):
+        import numpy as _np_g
+        _gx_vals = _np_g.linspace(_grid_x_min, _grid_x_max, int(_grid_x_steps))
+        _gy_vals = _np_g.linspace(_grid_y_min, _grid_y_max, int(_grid_y_steps))
+        _grid_data = {}
+        _gp_x = _sweep_params[_grid_param_x]
+        _gp_y = _sweep_params[_grid_param_y]
+        _g_prog = st.progress(0, text="Avvio griglia…")
+        _g_total = len(_gx_vals) * len(_gy_vals)
+        _g_done = 0
+        for _xv in _gx_vals:
+            _row_data = {}
+            for _yv in _gy_vals:
+                _g_done += 1
+                _g_prog.progress(int(_g_done / _g_total * 100),
+                                 text=f"Step {_g_done}/{_g_total}")
+                try:
+                    _cfg_g = _build_config(
+                        mode=_st_mode, duration_days=duration_days,
+                        swaps_per_day=swaps_per_day, coverage=coverage,
+                        mbase=mbase, loss_pct=loss_pct,
+                        false_negative_rate=false_negative_rate,
+                        sr_threshold_high=sr_threshold_high, sr_threshold_med=sr_threshold_med,
+                        oracle_reward_claim=oracle_reward_claim, captcha_reward=captcha_reward,
+                        initial_pool_balance=initial_pool_balance, rng_seed=rng_seed,
+                        n_synthetic_users=n_synthetic_users,
+                        tier_bronze_pct=tier_bronze_pct, tier_silver_pct=tier_silver_pct,
+                        tier_gold_pct=tier_gold_pct, tier_platinum_pct=tier_platinum_pct,
+                        fraud_rate=fraud_rate, omit_oracle_fraud=omit_oracle_fraud,
+                        n_oracles=n_oracles, n_oracles_per_claim=n_oracles_per_claim,
+                        divergence_threshold=divergence_threshold,
+                        entry_divergences=entry_divergences, watchlist_months=watchlist_months,
+                        oracle_stake_min=oracle_stake_min, slash_deposit=slash_deposit,
+                        slash_pool_pct=slash_pool_pct, slash_reporter_pct=slash_reporter_pct,
+                        slash_jury_pct=slash_jury_pct,
+                        fs_bronze=fs_bronze, fs_silver=fs_silver, fs_gold=fs_gold,
+                        fs_platinum=fs_platinum, fs_auto_approve=fs_auto_approve,
+                        fs_captcha=fs_captcha, cr_very_susp=cr_very_susp,
+                        cr_susp_high=cr_susp_high, cr_susp_med=cr_susp_med,
+                        b2s_swaps=b2s_swaps, b2s_days=b2s_days, b2s_maxfs=b2s_maxfs,
+                        s2g_swaps=s2g_swaps, s2g_days=s2g_days, s2g_maxfs=s2g_maxfs,
+                        pt_stake=pt_stake,
+                    )
+                    _cfg_g.setdefault(_gp_x[0], {})[_gp_x[1]] = float(_xv)
+                    _cfg_g.setdefault(_gp_y[0], {})[_gp_y[1]] = float(_yv)
+                    _, _, _sum_g = run_single(_cfg_g, mode=_st_mode, coverage=coverage, db_path=_DB_PATH)
+                    _metric_map = {
+                        "Profitto (ETH)":        _sum_g["total_profit_eth"],
+                        "Solvency Ratio finale": _sum_g["final_solvency_ratio"],
+                        "Tasso approvazione":    _sum_g["claim_approval_rate"],
+                    }
+                    _row_data[f"{_yv:.3f}"] = round(_metric_map[_grid_metric], 4)
+                except Exception as _e_g:
+                    _row_data[f"{_yv:.3f}"] = float("nan")
+            _grid_data[f"{_xv:.3f}"] = _row_data
+        _g_prog.progress(100, text="Griglia completata!")
+        _grid_df = pd.DataFrame(_grid_data).T
+        _grid_df.index.name = f"{_grid_param_x} \\ {_grid_param_y}"
+        st.markdown(f"**{_grid_metric}** — righe = {_grid_param_x}, colonne = {_grid_param_y}")
+        st.dataframe(_grid_df.style.format("{:.4f}").background_gradient(cmap="RdYlGn", axis=None),
+                     use_container_width=True)
+
+    st.markdown("---")
+
+    # ── 3c: Scenari Preimpostati ────────────────────────────────────────────
+    st.markdown("### 3c — Scenari Preimpostati")
+    st.caption("Simula quattro scenari estremi con i parametri attuali come base.")
+
+    _presets = {
+        "🔴 Crisi Sistemica": {
+            "desc": "Patt=25%, L%=40%, saldo iniziale basso — stress massimo sul pool",
+            "overrides": {"market": {"attack_rate": 0.25}, "pool": {"loss_pct_mean": 0.40, "initial_balance_eth": 20.0}},
+        },
+        "🟡 Alta Frode": {
+            "desc": "FNR=40%, molti utenti fraudolenti — il sistema di detection è sotto pressione",
+            "overrides": {"fraud_detection": {"false_negative_rate": 0.40, "user_fraud_rate": 0.20}},
+        },
+        "🟢 Mercato Stabile": {
+            "desc": "Patt=1%, L%=5%, saldo elevato — scenario ottimistico",
+            "overrides": {"market": {"attack_rate": 0.01}, "pool": {"loss_pct_mean": 0.05, "initial_balance_eth": 500.0}},
+        },
+        "🔵 Oracle Corrotti": {
+            "desc": "Molte divergenze oracle, slashing elevato — stress sulla governance",
+            "overrides": {"oracles": {"initial_count": 20, "fraud_enabled": True}, "fraud_detection": {"false_negative_rate": 0.35}},
+        },
+    }
+
+    _pr_cols = st.columns(4)
+    for _pr_i, (_pr_name, _pr_data) in enumerate(_presets.items()):
+        with _pr_cols[_pr_i]:
+            st.markdown(f"**{_pr_name}**")
+            st.caption(_pr_data["desc"])
+            if st.button(f"▶ Esegui", key=f"preset_run_{_pr_i}"):
+                try:
+                    _cfg_pr = _build_config(
+                        mode=_st_mode, duration_days=duration_days,
+                        swaps_per_day=swaps_per_day, coverage=coverage,
+                        mbase=mbase, loss_pct=loss_pct,
+                        false_negative_rate=false_negative_rate,
+                        sr_threshold_high=sr_threshold_high, sr_threshold_med=sr_threshold_med,
+                        oracle_reward_claim=oracle_reward_claim, captcha_reward=captcha_reward,
+                        initial_pool_balance=initial_pool_balance, rng_seed=rng_seed,
+                        n_synthetic_users=n_synthetic_users,
+                        tier_bronze_pct=tier_bronze_pct, tier_silver_pct=tier_silver_pct,
+                        tier_gold_pct=tier_gold_pct, tier_platinum_pct=tier_platinum_pct,
+                        fraud_rate=fraud_rate, omit_oracle_fraud=omit_oracle_fraud,
+                        n_oracles=n_oracles, n_oracles_per_claim=n_oracles_per_claim,
+                        divergence_threshold=divergence_threshold,
+                        entry_divergences=entry_divergences, watchlist_months=watchlist_months,
+                        oracle_stake_min=oracle_stake_min, slash_deposit=slash_deposit,
+                        slash_pool_pct=slash_pool_pct, slash_reporter_pct=slash_reporter_pct,
+                        slash_jury_pct=slash_jury_pct,
+                        fs_bronze=fs_bronze, fs_silver=fs_silver, fs_gold=fs_gold,
+                        fs_platinum=fs_platinum, fs_auto_approve=fs_auto_approve,
+                        fs_captcha=fs_captcha, cr_very_susp=cr_very_susp,
+                        cr_susp_high=cr_susp_high, cr_susp_med=cr_susp_med,
+                        b2s_swaps=b2s_swaps, b2s_days=b2s_days, b2s_maxfs=b2s_maxfs,
+                        s2g_swaps=s2g_swaps, s2g_days=s2g_days, s2g_maxfs=s2g_maxfs,
+                        pt_stake=pt_stake,
+                    )
+                    for _sec, _kvals in _pr_data["overrides"].items():
+                        _cfg_pr.setdefault(_sec, {}).update(_kvals)
+                    with st.spinner("Simulazione…"):
+                        _, _, _sum_pr = run_single(_cfg_pr, mode=_st_mode, coverage=coverage, db_path=_DB_PATH)
+                    st.metric("Profitto (ETH)", f"{_sum_pr['total_profit_eth']:.4f}")
+                    st.metric("SR finale", f"{_sum_pr['final_solvency_ratio']:.3f}")
+                    st.metric("Pool", "✓ SÌ" if _sum_pr["pool_survived"] else "✗ NO")
+                    st.metric("Approvazione claim", f"{_sum_pr['claim_approval_rate']:.1%}")
+                except Exception as _e_pr:
+                    st.error(f"Errore: {_e_pr}")
+
+
+# ==========================================================================
+# TAB 4 — ISTRUZIONI
 # ==========================================================================
 with tab_istr:
     st.subheader("📖 Guida al Simulatore MEV Insurance")

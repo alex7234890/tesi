@@ -67,11 +67,17 @@ class BlockchainDataSource(BaseDataSource):
             return
 
         sorted_days = sorted(swaps_by_day.keys())
+        # Use override from config if provided (e.g. patt computed from Infura metadata)
+        _patt_override: Optional[float] = config.get("market", {}).get("attack_rate") or None
+
         for day_key in sorted_days:
             raw = swaps_by_day[day_key]
             total = len(raw)
-            attacked = sum(1 for r in raw if r["is_attacked"])
-            patt = attacked / total if total > 0 else 0.01
+            if _patt_override is not None:
+                patt = _patt_override
+            else:
+                attacked = sum(1 for r in raw if r["is_attacked"])
+                patt = attacked / total if total > 0 else 0.01
             self._patt_per_day.append(patt)
 
             # Randomly pick insured swaps
