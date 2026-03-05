@@ -45,10 +45,22 @@ st.set_page_config(
 # =========================================================================
 # Session state
 # =========================================================================
+# Legge la chiave Infura dal config/base.yaml alla prima esecuzione
+def _read_infura_key_from_config() -> str:
+    try:
+        cfg = load_config(os.path.join(_ROOT, "config", "base.yaml"))
+        url = cfg.get("blockchain", {}).get("infura_url", "")
+        if "/v3/" in url:
+            return url.split("/v3/")[-1].strip().rstrip("/")
+    except Exception:
+        pass
+    return ""
+
 for _k, _v in [
     ("results", {}), ("summaries", {}), ("collectors", {}),
     ("last_mode", 2), ("confirm_clear_cache", False),
     ("infura_download_log", ""),
+    ("infura_api_key", _read_infura_key_from_config()),
 ]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -248,23 +260,10 @@ with st.sidebar.expander("📈 Parametri Upgrade Tier"):
     pt_stake   = st.slider("Stake Platinum (% del limite swap scelto)", 5, 50, 20, step=1, key="tu_pt_stake")
 
 st.sidebar.markdown("---")
-
-# ---- Parametri Mode 1 (sempre nel DOM, disabilitati in Mode 2) ----
-with st.sidebar.expander("🔗 Parametri Mode 1 — Dati Reali"):
-    infura_api_key = st.text_input(
-        "Chiave API Infura", value="", type="password",
-        placeholder="Inserisci il Project ID Infura",
-        key="m1_infura_key", disabled=is_mode2,
-    )
-    block_range_days = st.number_input(
-        "Intervallo blocchi (giorni)", min_value=1, max_value=7, value=2, step=1,
-        key="m1_block_range", disabled=is_mode2,
-    )
-    dex_targets = st.multiselect(
-        "Contratti DEX monitorati",
-        _DEX_OPTIONS, default=["Uniswap V2", "Uniswap V3"],
-        key="m1_dex_targets", disabled=is_mode2,
-    )
+# Chiave Infura letta da session_state (gestita nella tab Dati Infura)
+infura_api_key = st.session_state.get("infura_api_key", "")
+if is_mode1:
+    st.sidebar.caption("🔑 Chiave Infura e parametri download nella tab **🔗 Dati Infura**")
 
 # ---- Parametri Mode 2 (sempre nel DOM, disabilitati in Mode 1) ----
 with st.sidebar.expander("🔬 Parametri Mode 2 — Sintetica"):
@@ -307,7 +306,6 @@ def _build_config(
     mbase: float, loss_pct: float, false_negative_rate: float,
     sr_threshold_high: float, sr_threshold_med: float,
     oracle_reward_claim: float, captcha_reward: float, initial_pool_balance: float,
-    infura_api_key: str, block_range_days: int,
     rng_seed: int, n_synthetic_users: int,
     tier_bronze_pct: float, tier_silver_pct: float,
     tier_gold_pct: float, tier_platinum_pct: float, fraud_rate: float,
@@ -384,9 +382,8 @@ def _build_config(
             "platinum": float(tier_platinum_pct) / 100.0,
         }
 
-    if mode == 1 and infura_api_key:
-        cfg["blockchain"]["infura_url"] = f"wss://mainnet.infura.io/ws/v3/{infura_api_key}"
-        cfg["blockchain"]["block_range_days"] = int(block_range_days)
+    # La chiave Infura è già nel config caricato da base.yaml
+    # (gestita e salvata dalla tab Dati Infura)
 
     return cfg
 
@@ -412,8 +409,7 @@ def _all_params() -> dict:
         cr_very_susp=cr_very_susp, cr_susp_high=cr_susp_high, cr_susp_med=cr_susp_med,
         b2s_swaps=b2s_swaps, b2s_days=b2s_days, b2s_maxfs=b2s_maxfs,
         s2g_swaps=s2g_swaps, s2g_days=s2g_days, s2g_maxfs=s2g_maxfs, pt_stake=pt_stake,
-        infura_api_key=infura_api_key, block_range_days=block_range_days,
-        dex_targets=dex_targets, patt_file_path=patt_file_path,
+        patt_file_path=patt_file_path,
         rng_seed=rng_seed, n_synthetic_users=n_synthetic_users, fraud_rate=fraud_rate,
         tier_bronze_pct=tier_bronze_pct, tier_silver_pct=tier_silver_pct,
         tier_gold_pct=tier_gold_pct, tier_platinum_pct=tier_platinum_pct,
@@ -550,7 +546,6 @@ if run_btn:
             false_negative_rate=false_negative_rate, sr_threshold_high=sr_threshold_high,
             sr_threshold_med=sr_threshold_med, oracle_reward_claim=oracle_reward_claim,
             captcha_reward=captcha_reward, initial_pool_balance=initial_pool_balance,
-            infura_api_key=infura_api_key, block_range_days=block_range_days,
             rng_seed=rng_seed, n_synthetic_users=n_synthetic_users,
             tier_bronze_pct=tier_bronze_pct, tier_silver_pct=tier_silver_pct,
             tier_gold_pct=tier_gold_pct, tier_platinum_pct=tier_platinum_pct,
@@ -934,178 +929,260 @@ with tab_sim:
 # TAB 2 — DATI INFURA
 # ==========================================================================
 with tab_infura:
-    st.subheader("🔗 Dati Infura — Gestione e Stato")
+    st.subheader("🔗 Dati Infura — Gestione e Download")
 
-    # 5a — Stato connessione
-    st.markdown("### Stato Connessione")
-    key_ok = bool(infura_api_key and len(infura_api_key) > 8)
-    key_masked = (infura_api_key[:4] + "****") if key_ok else "(non configurata)"
-
-    _cache_files = _glob.glob(os.path.join(_CACHE_DIR, "blocks_*.pkl"))
-    if _cache_files:
-        _newest_cache  = max(_cache_files, key=os.path.getmtime)
-        _cache_ts      = datetime.datetime.fromtimestamp(os.path.getmtime(_newest_cache))
-        cache_status   = f"✓ presente — aggiornata il {_cache_ts.strftime('%d/%m/%Y %H:%M')}"
-        cache_file_str = os.path.basename(_newest_cache)
-    else:
-        cache_status   = "✗ assente"
-        cache_file_str = "—"
-
-    db_exists    = os.path.isfile(_DB_PATH)
-    last_fetch   = "mai"
-    if db_exists:
-        _ts = os.path.getmtime(_DB_PATH)
-        last_fetch = datetime.datetime.fromtimestamp(_ts).strftime("%d/%m/%Y %H:%M")
-
-    st.markdown(
-        f"| Campo | Valore |\n|---|---|\n"
-        f"| Chiave API | `{key_masked}` |\n"
-        f"| Stato | {'🟢 Configurata' if key_ok else '🔴 Non configurata'} |\n"
-        f"| Ultimo fetch DB | {last_fetch} |\n"
-        f"| Cache locale | {cache_status} |\n"
-        f"| File cache | `{cache_file_str}` |\n"
+    # ── Sezione chiave API ──────────────────────────────────────────────────
+    st.markdown("### 🔑 Chiave API Infura")
+    st.caption(
+        "Il Project ID Infura viene letto da `config/base.yaml` e salvato lì. "
+        "Modificalo qui se vuoi usarne uno diverso."
     )
 
-    if not key_ok:
-        st.warning(
-            "⚠️ Chiave Infura non configurata. Inseriscila nel pannello "
-            "**Parametri Mode 1 — Dati Reali** nella sidebar per abilitare il fetch."
+    _current_key = st.session_state.get("infura_api_key", "")
+    _key_col, _btn_col = st.columns([4, 1])
+    with _key_col:
+        _key_input = st.text_input(
+            "Project ID Infura",
+            value=_current_key,
+            key="infura_key_field",
+            placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            help="32 caratteri esadecimali — trovalo su infura.io > My Projects",
         )
+    with _btn_col:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("💾 Salva", key="save_infura_key_btn"):
+            _new_key = _key_input.strip()
+            if _new_key:
+                # Scrivi in base.yaml con sostituzione regex
+                import re as _re
+                _base_yaml = os.path.join(_ROOT, "config", "base.yaml")
+                try:
+                    with open(_base_yaml, "r", encoding="utf-8") as _f:
+                        _content = _f.read()
+                    _new_url = f"wss://mainnet.infura.io/ws/v3/{_new_key}"
+                    _content = _re.sub(
+                        r'(infura_url:\s*")[^"]*(")',
+                        rf'\g<1>{_new_url}\2',
+                        _content,
+                    )
+                    with open(_base_yaml, "w", encoding="utf-8") as _f:
+                        _f.write(_content)
+                    st.session_state["infura_api_key"] = _new_key
+                    st.success(f"✅ Chiave salvata in `config/base.yaml`")
+                except Exception as _exc:
+                    st.error(f"⚠️ Errore salvataggio: {_exc}")
+            else:
+                st.warning("Inserisci una chiave valida prima di salvare.")
+
+    # Stato chiave
+    _key_ok = bool(st.session_state.get("infura_api_key", "") and
+                   len(st.session_state["infura_api_key"]) > 8)
+    if _key_ok:
+        _k = st.session_state["infura_api_key"]
+        st.success(f"🟢 Chiave configurata: `{_k[:6]}…{_k[-4:]}`")
+    else:
+        st.error("🔴 Chiave non configurata — inseriscila sopra e clicca Salva.")
 
     st.markdown("---")
 
-    # 5b — Pulsanti azione
+    # ── Parametri download ──────────────────────────────────────────────────
+    st.markdown("### ⚙️ Parametri Download")
+    _dl_col1, _dl_col2 = st.columns(2)
+    with _dl_col1:
+        _block_range_days = st.number_input(
+            "Intervallo dati (giorni)", min_value=1, max_value=7, value=2, step=1,
+            key="infura_block_range",
+            help="Quanti giorni di blocchi Ethereum scaricare (1 giorno ≈ 6.646 blocchi)",
+        )
+    with _dl_col2:
+        _dex_targets = st.multiselect(
+            "DEX da monitorare",
+            _DEX_OPTIONS,
+            default=["Uniswap V2", "Uniswap V3"],
+            key="infura_dex_targets",
+        )
+
+    # Stima chiamate in tempo reale
+    if _dex_targets:
+        from scripts.download_blocks import CHUNK_SIZE as _CS, BLOCKS_PER_DAY as _BPD, _DEX_TOPIC_MAP as _DTM
+        _n_chunks = (_block_range_days * _BPD + _CS - 1) // _CS
+        # topic unici richiesti
+        _unique_topics = len({_DTM[d] for d in _dex_targets if d in _DTM})
+        _est_calls = _n_chunks * _unique_topics + 1  # +1 per blocco ref timestamp
+        st.info(
+            f"**Stima chiamate Infura:** {_est_calls} "
+            f"({_n_chunks} chunk × {_unique_topics} topic + 1 timestamp) "
+            f"— invece di ~{_block_range_days * _BPD:,} con il vecchio metodo"
+        )
+    else:
+        st.warning("Seleziona almeno un DEX.")
+
+    st.markdown("---")
+
+    # ── Azioni ─────────────────────────────────────────────────────────────
     st.markdown("### Azioni")
-    btn_col1, btn_col2, btn_col3 = st.columns(3)
+    _act_col1, _act_col2, _act_col3 = st.columns(3)
 
-    with btn_col1:
-        if st.button("🔄 Scarica dati ora", key="infura_download_btn", disabled=not key_ok):
-            infura_url = f"wss://mainnet.infura.io/ws/v3/{infura_api_key}"
-            n_blocks   = int(block_range_days) * 6646
+    with _act_col1:
+        _dl_disabled = not (_key_ok and _dex_targets)
+        if st.button("🔄 Scarica dati ora", key="infura_download_btn",
+                     disabled=_dl_disabled):
+            _infura_url = f"wss://mainnet.infura.io/ws/v3/{st.session_state['infura_api_key']}"
             try:
-                from scripts.download_blocks import download as _dl_blocks
-                with st.spinner(f"Scaricamento blocchi da Infura ({block_range_days} giorni ~ {n_blocks:,} blocchi)…"):
-                    _dl_blocks(infura_url, n_blocks, _DB_PATH)
-                st.session_state["infura_download_log"] = (
-                    f"✅ Download completato: {n_blocks:,} blocchi, "
-                    f"{datetime.datetime.now().strftime('%d/%m/%Y %H:%M')}"
-                )
-                st.success(st.session_state["infura_download_log"])
-            except ImportError:
-                st.error("⚠️ La libreria `web3` non è installata. Esegui: `pip install web3`")
-            except Exception as exc:
-                st.error(f"⚠️ Errore durante il download: {exc}")
+                from scripts.download_blocks import fetch_dex_events as _fetch, save_to_db as _save_db
+                _progress_bar = st.progress(0, text="Avvio…")
 
-    with btn_col2:
+                def _cb(pct, msg):
+                    _progress_bar.progress(int(min(pct, 100)), text=msg)
+
+                _cache_path_dir = os.path.join(_ROOT, "cache")
+                _result = _fetch(
+                    infura_url=_infura_url,
+                    days=int(_block_range_days),
+                    dex_targets=_dex_targets,
+                    cache_dir=_cache_path_dir,
+                    progress_cb=_cb,
+                )
+                _save_db(_result, _DB_PATH)
+                _progress_bar.progress(100, text="Completato!")
+                _meta = _result["metadata"]
+                st.success(
+                    f"✅ Completato: **{_meta['total_swaps']:,} swap**, "
+                    f"**{_meta['total_sandwiches']:,} sandwich** in "
+                    f"**{_meta['infura_calls_used']} chiamate Infura**"
+                )
+                st.session_state["infura_download_log"] = (
+                    f"{datetime.datetime.now().strftime('%d/%m/%Y %H:%M')} — "
+                    f"{_meta['total_swaps']} swap, {_meta['total_sandwiches']} sandwich"
+                )
+                st.rerun()
+            except ImportError:
+                st.error("⚠️ `web3` non installato. Esegui: `pip install web3`")
+            except ConnectionError as _exc:
+                st.error(f"⚠️ Connessione fallita: {_exc}")
+            except Exception as _exc:
+                st.error(f"⚠️ Errore: {_exc}")
+
+    with _act_col2:
         if st.button("🗑️ Cancella cache", key="infura_clear_btn"):
             st.session_state["confirm_clear_cache"] = True
-
         if st.session_state.get("confirm_clear_cache", False):
-            st.warning("Sei sicuro di voler eliminare tutti i file cache (.pkl)?")
-            conf_col1, conf_col2 = st.columns(2)
-            with conf_col1:
-                if st.button("✅ Conferma cancellazione", key="confirm_clear_yes"):
-                    deleted = 0
-                    for f in _glob.glob(os.path.join(_CACHE_DIR, "blocks_*.pkl")):
-                        os.remove(f)
-                        deleted += 1
+            st.warning("Eliminare tutti i file `.pkl` dalla cache locale?")
+            _cc1, _cc2 = st.columns(2)
+            with _cc1:
+                if st.button("✅ Conferma", key="confirm_clear_yes"):
+                    _deleted = 0
+                    for _cf in _glob.glob(os.path.join(_CACHE_DIR, "*.pkl")):
+                        os.remove(_cf)
+                        _deleted += 1
                     st.session_state["confirm_clear_cache"] = False
-                    st.success(f"🗑️ Eliminati {deleted} file cache.")
-            with conf_col2:
+                    st.success(f"🗑️ Eliminati {_deleted} file.")
+                    st.rerun()
+            with _cc2:
                 if st.button("❌ Annulla", key="confirm_clear_no"):
                     st.session_state["confirm_clear_cache"] = False
 
-    with btn_col3:
-        preview_btn = st.button("👁️ Anteprima dati", key="infura_preview_btn", disabled=not db_exists)
+    with _act_col3:
+        _db_exists = os.path.isfile(_DB_PATH)
+        _preview_btn = st.button("👁️ Anteprima dati", key="infura_preview_btn",
+                                  disabled=not _db_exists)
 
-    if preview_btn and db_exists:
+    if _preview_btn and _db_exists:
         try:
-            con = sqlite3.connect(_DB_PATH, check_same_thread=False)
-            try:
-                from download_blocks import _DDL as _DB_DDL
-                con.executescript(_DB_DDL)
-                con.commit()
-            except Exception:
-                pass
-            prev_df = pd.read_sql("SELECT * FROM swaps LIMIT 50", con)
-            con.close()
-            st.markdown("**Primi 50 swap nel database locale:**")
-            st.dataframe(prev_df, use_container_width=True)
-        except Exception as exc:
-            st.error(f"⚠️ Impossibile leggere il database: {exc}")
+            _pcon = sqlite3.connect(_DB_PATH, check_same_thread=False)
+            _prev_df = pd.read_sql("SELECT * FROM swaps ORDER BY timestamp DESC LIMIT 50", _pcon)
+            _pcon.close()
+            st.markdown("**Ultimi 50 swap nel database (ordinati per timestamp):**")
+            st.dataframe(_prev_df, use_container_width=True)
+        except Exception as _exc:
+            st.error(f"⚠️ Errore lettura DB: {_exc}")
 
     st.markdown("---")
 
-    # 5c — Dettaglio dati scaricati
-    if db_exists:
-        st.markdown("### Dettaglio Dati Scaricati")
-        try:
-            con = sqlite3.connect(_DB_PATH, check_same_thread=False)
-            # Applica lo schema (no-op se le tabelle esistono già)
-            sys.path.insert(0, os.path.join(_ROOT, "scripts"))
-            try:
-                from download_blocks import _DDL as _DB_DDL
-                con.executescript(_DB_DDL)
-                con.commit()
-            except Exception:
-                pass
-            total_swaps = con.execute("SELECT COUNT(*) FROM swaps").fetchone()[0]
-            min_block   = con.execute("SELECT MIN(block_number) FROM swaps").fetchone()[0] or 0
-            max_block   = con.execute("SELECT MAX(block_number) FROM swaps").fetchone()[0] or 0
-            min_ts      = con.execute("SELECT MIN(timestamp) FROM swaps").fetchone()[0] or 0
-            max_ts      = con.execute("SELECT MAX(timestamp) FROM swaps").fetchone()[0] or 0
-            sw_by_dex   = dict(con.execute("SELECT dex, COUNT(*) FROM swaps GROUP BY dex").fetchall())
-            n_attacks   = con.execute("SELECT COUNT(*) FROM sandwich_attacks").fetchone()[0]
-            con.close()
+    # ── Stato DB ────────────────────────────────────────────────────────────
+    st.markdown("### 📊 Stato Database Locale")
 
-            def _ts(t):
+    _db_exists = os.path.isfile(_DB_PATH)
+    _cache_files_all = _glob.glob(os.path.join(_CACHE_DIR, "*.pkl"))
+    _last_fetch_str  = "mai"
+    if _db_exists:
+        _last_fetch_str = datetime.datetime.fromtimestamp(
+            os.path.getmtime(_DB_PATH)
+        ).strftime("%d/%m/%Y %H:%M")
+
+    if _cache_files_all:
+        _nc = max(_cache_files_all, key=os.path.getmtime)
+        _cache_info = f"✓ {len(_cache_files_all)} file — ultimo: {datetime.datetime.fromtimestamp(os.path.getmtime(_nc)).strftime('%d/%m/%Y %H:%M')}"
+    else:
+        _cache_info = "✗ assente"
+
+    if _db_exists:
+        try:
+            _scon = sqlite3.connect(_DB_PATH, check_same_thread=False)
+            sys.path.insert(0, os.path.join(_ROOT, "scripts"))
+            from scripts.download_blocks import _DDL as _DB_DDL
+            _scon.executescript(_DB_DDL)
+            _scon.commit()
+            _total_sw  = _scon.execute("SELECT COUNT(*) FROM swaps").fetchone()[0]
+            _min_blk   = _scon.execute("SELECT MIN(block_number) FROM swaps").fetchone()[0] or 0
+            _max_blk   = _scon.execute("SELECT MAX(block_number) FROM swaps").fetchone()[0] or 0
+            _min_ts    = _scon.execute("SELECT MIN(timestamp) FROM swaps").fetchone()[0] or 0
+            _max_ts    = _scon.execute("SELECT MAX(timestamp) FROM swaps").fetchone()[0] or 0
+            _dex_cnt   = dict(_scon.execute("SELECT dex, COUNT(*) FROM swaps GROUP BY dex").fetchall())
+            _n_atk     = _scon.execute("SELECT COUNT(*) FROM sandwich_attacks").fetchone()[0]
+            _scon.close()
+
+            def _fmts(t):
                 try:
                     return datetime.datetime.utcfromtimestamp(t).strftime("%d/%m/%Y")
                 except Exception:
                     return "—"
 
-            patt_pct = n_attacks / max(total_swaps, 1) * 100
+            _patt_pct = _n_atk / max(_total_sw, 1) * 100
             st.markdown(
                 f"| Campo | Valore |\n|---|---|\n"
-                f"| Blocchi analizzati | da #{min_block:,} a #{max_block:,} |\n"
-                f"| Periodo coperto | {_ts(min_ts)} — {_ts(max_ts)} |\n"
-                f"| Swap totali trovati | {total_swaps:,} |\n"
-                f"| — Uniswap V2 | {sw_by_dex.get('uniswap_v2', 0):,} |\n"
-                f"| — Uniswap V3 | {sw_by_dex.get('uniswap_v3', 0):,} |\n"
-                f"| — Sushiswap | {sw_by_dex.get('sushiswap', 0):,} |\n"
-                f"| — Curve | {sw_by_dex.get('curve', 0):,} |\n"
-                f"| Sandwich attacks | {n_attacks:,} ({patt_pct:.2f}% degli swap) |\n"
+                f"| Ultimo aggiornamento DB | {_last_fetch_str} |\n"
+                f"| Cache locale | {_cache_info} |\n"
+                f"| Blocchi analizzati | #{_min_blk:,} → #{_max_blk:,} |\n"
+                f"| Periodo coperto | {_fmts(_min_ts)} — {_fmts(_max_ts)} |\n"
+                f"| **Swap totali** | **{_total_sw:,}** |\n"
+                f"| — Uniswap V2 | {_dex_cnt.get('uniswap_v2', 0):,} |\n"
+                f"| — Uniswap V3 | {_dex_cnt.get('uniswap_v3', 0):,} |\n"
+                f"| — Sushiswap | {_dex_cnt.get('sushiswap', 0):,} |\n"
+                f"| — Curve | {_dex_cnt.get('curve', 0):,} |\n"
+                f"| **Sandwich attacks** | **{_n_atk:,}** ({_patt_pct:.2f}% degli swap) |\n"
             )
-        except Exception as exc:
-            st.warning(f"Impossibile leggere statistiche dal database: {exc}")
+            if _total_sw == 0:
+                st.warning("Il DB esiste ma non contiene ancora swap. Clicca **🔄 Scarica dati ora**.")
+        except Exception as _exc:
+            st.warning(f"Impossibile leggere le statistiche: {_exc}")
     else:
-        st.info("Nessun database locale trovato. Scarica i dati con il pulsante sopra (richiede Mode 1 e chiave Infura).")
+        st.info(
+            "Nessun database locale trovato. "
+            "Configura la chiave Infura e clicca **🔄 Scarica dati ora**."
+        )
 
     st.markdown("---")
-
-    # 5d — Spiegazione metodologia
-    st.markdown("### Come Sono Calcolati i Dati")
+    st.markdown("### Come Funziona il Fetch (eth_getLogs)")
     st.markdown(
         """
-**Come vengono rilevati i sandwich attack:**
-1. Per ogni blocco nell'intervallo, vengono lette tutte le transazioni
-2. Si cercano triple (frontrun, victim, backrun) che rispettano:
-   - Stesso blocco o blocchi consecutivi
-   - Stesso pool DEX e stessa coppia di token
-   - Stesso indirizzo per frontrun e backrun (l'attaccante)
-   - Indirizzo diverso per la vittima
-3. Il rapporto sandwich/swap totali diventa il valore Patt giornaliero
+**Metodo eth_getLogs — molto più veloce del vecchio block-by-block:**
 
-**Come viene calcolato Patt:**
-```
-Patt = (sandwich rilevati) / (swap totali) × (1 + ms)
-```
-dove `ms = 0.05` (volume ≥ 10.000 swap) / `0.10` (1.000–9.999) / `0.20` (< 1.000)
+| | Vecchio metodo | Nuovo metodo |
+|---|---|---|
+| Strategia | 1 chiamata per blocco | 1 chiamata per chunk di 2.000 blocchi |
+| Chiamate per 2 giorni | ~13.300 | ~14 |
+| Tempo atteso | ~94 ore | < 30 secondi |
 
-**Aggiornamento:**
-- Il valore Patt viene ricalcolato ogni 24h di simulazione.
-- **Mode 1:** calcolato dai dati reali in cache locale.
-- **Mode 2:** caricato dal file CSV storico, oppure generato sinteticamente (~5% ±2%).
+**Come vengono filtrati gli eventi:**
+1. Solo i pool principali (USDC/ETH, ETH/USDT, DAI/ETH, WBTC/ETH per ogni DEX)
+2. Solo gli event signature topic `Swap(...)` del DEX selezionato
+3. Infura restituisce solo i log che matchano entrambi i filtri
+
+**Timestamp:** stimato linearmente (1 blocco ≈ 13s) con 1 chiamata di riferimento.
+
+**Rilevamento sandwich:** tripla (frontrun, victim, backrun) sullo stesso pool,
+blocchi consecutivi, tx_hash diversi.
 """
     )
 
