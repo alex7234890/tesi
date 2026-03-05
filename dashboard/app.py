@@ -645,11 +645,26 @@ with tab_sim:
         c2.metric("Tasso approvazione claim", f"{first_summary['claim_approval_rate']:.1%}")
         c3.metric("Pool sopravvissuto", "SÌ ✓" if first_summary["pool_survived"] else "NO ✗")
 
+        # ---- Breakdown banner ----
+        _bd = first_summary.get("breakdown_event")
+        if _bd:
+            st.error(
+                f"💥 **Il pool si è rotto al giorno {_bd['day']}** — {_bd['reason']}\n\n"
+                f"Saldo pool: {_bd['pool_balance']:.4f} ETH | "
+                f"Passività pendenti: {_bd['pending_liabilities']:.4f} ETH | "
+                f"SR: {_bd['sr']:.4f}"
+            )
+        else:
+            st.success("✅ Il pool ha superato l'intera simulazione senza rotture.")
+
         st.markdown("---")
 
         # ---- Pannello 1: Salute Pool ----
         st.subheader("1 — Salute del Pool nel Tempo")
         st.caption("Fonte: saldo e Solvency Ratio tracciati da InsurancePool dopo ogni giornata simulata")
+        _bd1     = first_summary.get("breakdown_event")
+        _bd1_day = _bd1["day"] if _bd1 else None
+
         pool_df = first_df[[
             "day", "pool_balance_eth", "pending_liabilities_eth",
             "solvency_ratio", "madj_current", "net_flow_today",
@@ -659,11 +674,35 @@ with tab_sim:
             "Solvency Ratio", "M_adj", "Variazione Netta (ETH)",
         ]
 
+        def _get_stato(row):
+            d = int(row["Giorno"])
+            sr_v = float(row["Solvency Ratio"])
+            if _bd1_day is not None and d == _bd1_day:
+                return "💥 ROTTURA"
+            elif _bd1_day is not None and d > _bd1_day:
+                return "⚠️ post-rottura"
+            elif sr_v < 1.0:
+                return "🔴 insolvente"
+            elif sr_v < 1.3:
+                return "🟠 rischio medio"
+            else:
+                return "🟢 sano"
+
+        pool_df["Stato"] = pool_df.apply(_get_stato, axis=1)
+
         def _color_net(v):
             try:
                 return "color: green" if float(v) >= 0 else "color: red"
             except Exception:
                 return ""
+
+        def _highlight_bd(row):
+            d = int(row["Giorno"])
+            if _bd1_day is not None and d == _bd1_day:
+                return ["background-color: #ff4444; color: white"] * len(row)
+            elif _bd1_day is not None and d == _bd1_day - 1:
+                return ["background-color: #ffaa00; color: black"] * len(row)
+            return [""] * len(row)
 
         st.dataframe(
             pool_df.style
@@ -671,7 +710,8 @@ with tab_sim:
                 "Saldo Pool (ETH)": "{:.4f}", "Passività Pendenti (ETH)": "{:.4f}",
                 "Solvency Ratio": "{:.4f}", "M_adj": "{:.2f}", "Variazione Netta (ETH)": "{:+.4f}",
             })
-            .applymap(_color_net, subset=["Variazione Netta (ETH)"]),
+            .applymap(_color_net, subset=["Variazione Netta (ETH)"])
+            .apply(_highlight_bd, axis=1),
             use_container_width=True, height=300,
         )
 
@@ -853,11 +893,32 @@ with tab_sim:
         # ---- Pannello 6: Esploratore Giornaliero ----
         st.subheader("6 — Esploratore Giornaliero")
 
+        _bd6     = first_summary.get("breakdown_event")
+        _bd6_day = _bd6["day"] if _bd6 else None
+
         max_day      = int(first_df["day"].max())
         selected_day = st.slider(
-            "Seleziona giorno", min_value=0, max_value=max_day, value=0, step=1,
-            key="day_explorer_slider",
+            "Seleziona giorno", min_value=0, max_value=max_day,
+            value=_bd6_day if _bd6_day is not None else 0,
+            step=1, key="day_explorer_slider",
         )
+
+        if _bd6_day is not None:
+            st.info(
+                f"⚠️ Il pool si è rotto al **giorno {_bd6_day}**. "
+                "Naviga fino a quel giorno per vedere i dettagli."
+            )
+
+        if _bd6_day is not None and selected_day == _bd6_day:
+            st.error(
+                f"💥 **GIORNO DI ROTTURA**\n\n"
+                f"Motivo: {_bd6['reason']}\n\n"
+                f"SR sceso a: {_bd6['sr']:.4f} | "
+                f"Saldo pool: {_bd6['pool_balance']:.4f} ETH | "
+                f"Passività pendenti: {_bd6['pending_liabilities']:.4f} ETH"
+            )
+        elif _bd6_day is not None and selected_day == _bd6_day - 1:
+            st.warning("⚠️ Giorno precedente alla rottura — controlla SR e saldo pool.")
 
         row = first_df[first_df["day"] == selected_day]
         if row.empty:
@@ -933,7 +994,38 @@ with tab_sim:
                         st.info("Nessun dettaglio swap disponibile per questo giorno.")
 
         with st.expander("📊 Dati grezzi simulazione", expanded=False):
-            st.dataframe(first_df, use_container_width=True)
+            _bd_raw = first_summary.get("breakdown_event")
+            _bd_raw_day = _bd_raw["day"] if _bd_raw else None
+            _full_df = first_df.copy()
+
+            def _get_stato_full(row):
+                d    = int(row["day"])
+                sr_v = float(row.get("solvency_ratio", 1.5))
+                if _bd_raw_day is not None and d == _bd_raw_day:
+                    return "💥 ROTTURA"
+                elif _bd_raw_day is not None and d > _bd_raw_day:
+                    return "⚠️ post-rottura"
+                elif sr_v < 1.0:
+                    return "🔴 insolvente"
+                elif sr_v < 1.3:
+                    return "🟠 rischio medio"
+                else:
+                    return "🟢 sano"
+
+            _full_df.insert(1, "Stato", _full_df.apply(_get_stato_full, axis=1))
+
+            def _highlight_bd_full(row):
+                d = int(row["day"])
+                if _bd_raw_day is not None and d == _bd_raw_day:
+                    return ["background-color: #ff4444; color: white"] * len(row)
+                elif _bd_raw_day is not None and d == _bd_raw_day - 1:
+                    return ["background-color: #ffaa00; color: black"] * len(row)
+                return [""] * len(row)
+
+            st.dataframe(
+                _full_df.style.apply(_highlight_bd_full, axis=1),
+                use_container_width=True,
+            )
 
         st.markdown("---")
         st.subheader("📁 Tutti i Dati")
