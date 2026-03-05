@@ -5,7 +5,7 @@ simulation:
   n_runs: 1
 
 blockchain:
-  infura_url: "wss://mainnet.infura.io/ws/v3/YOUR_KEY"
+  infura_url: "wss://mainnet.infura.io/ws/v3/23727094121c4343b05d474e08e1a3ff"
   blocks_to_fetch: 50000
   dex_contracts:
     uniswap_v2: "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"

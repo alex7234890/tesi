@@ -82,7 +82,7 @@ def compute_from_infura(
 
     logger.info(f"Connecting to {infura_url} for Patt computation …")
     if infura_url.startswith("wss://"):
-        w3 = Web3(Web3.LegacyWebSocketProvider(infura_url))
+        w3 = Web3(Web3.WebsocketProvider(infura_url))
     else:
         w3 = Web3(Web3.HTTPProvider(infura_url))
 
