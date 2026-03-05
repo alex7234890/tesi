@@ -68,7 +68,7 @@ class BlockchainDataSource(BaseDataSource):
 
         sorted_days = sorted(swaps_by_day.keys())
         # Use override from config if provided (e.g. patt computed from Infura metadata)
-        _patt_override: Optional[float] = config.get("market", {}).get("attack_rate") or None
+        _patt_override: Optional[float] = self.config.get("market", {}).get("attack_rate") or None
 
         for day_key in sorted_days:
             raw = swaps_by_day[day_key]
