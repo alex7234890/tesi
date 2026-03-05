@@ -1,15 +1,13 @@
 """
-Download recent Ethereum blocks from Infura and detect sandwich attacks.
+Infura data fetcher — usa eth_getLogs invece di block-by-block.
 
-Stores results in SQLite:
-  - Table: swaps           (all DEX swap transactions)
-  - Table: sandwich_attacks (detected sandwiches)
-
-Usage:
-    python scripts/download_blocks.py
-    python scripts/download_blocks.py --blocks 10000 --db data/blockchain.db
+~14 chiamate Infura per 2 giorni invece di ~13.300.
 """
 from __future__ import annotations
+
+import warnings
+warnings.filterwarnings("ignore", message=".*ChainId.*")
+warnings.filterwarnings("ignore", message=".*eth-typing.*")
 
 import argparse
 import os
@@ -17,9 +15,10 @@ import pickle
 import sqlite3
 import sys
 import time
-from typing import Dict, List, Optional, Set, Tuple
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Set
 
-from tqdm import tqdm
+import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from utils.config_loader import load_config
@@ -27,23 +26,47 @@ from utils.logger import get_logger
 
 logger = get_logger("download_blocks")
 
-# ---------------------------------------------------------------------------
-# DEX contract addresses (from config — these are factory / router addresses)
-# ---------------------------------------------------------------------------
-_UNISWAP_V2_FACTORY  = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f".lower()
-_UNISWAP_V3_FACTORY  = "0x1F98431c8aD98523631AE4a59f267346ea31F984".lower()
-_SUSHISWAP_FACTORY   = "0xC0AEe478e3658e2610c5F7A4A2E1777cE9e4f2Ac".lower()
+SWAP_TOPIC_V2    = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
+SWAP_TOPIC_V3    = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
+SWAP_TOPIC_CURVE = "0x8b3e96f2b889fa771c53c981b40daf005f63f637f1869f707052d15a3dd97140"
 
-# Swap event topics
-_SWAP_TOPIC_V2 = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"
-_SWAP_TOPIC_V3 = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67"
+_DEX_TOPIC_MAP: Dict[str, str] = {
+    "Uniswap V2": SWAP_TOPIC_V2,
+    "Sushiswap":  SWAP_TOPIC_V2,
+    "Uniswap V3": SWAP_TOPIC_V3,
+    "Curve":      SWAP_TOPIC_CURVE,
+}
 
-_KNOWN_TOPICS = {_SWAP_TOPIC_V2, _SWAP_TOPIC_V3}
+_DEX_DISPLAY_TO_DB: Dict[str, str] = {
+    "Uniswap V2": "uniswap_v2",
+    "Uniswap V3": "uniswap_v3",
+    "Sushiswap":  "sushiswap",
+    "Curve":      "curve",
+}
 
+POOL_ADDRESSES: Dict[str, List[str]] = {
+    "Uniswap V2": [
+        "0xB4e16d0168e52d35CaCD2c6185b44281Ec28C9Dc",
+        "0x0d4a11d5EEaaC28EC3F61d100daF4d40471f1852",
+        "0xA478c2975Ab1Ea89e8196811F51A7B7Ade33eB11",
+        "0xBb2b8038a1640196FbE3e38816F3e67Cba72D940",
+    ],
+    "Sushiswap": [
+        "0x397FF1542f962076d0BFE58eA045FfA2d347ACa0",
+        "0x06da0fd433C1A5d7a4faa01111c044910A184553",
+    ],
+    "Uniswap V3": [
+        "0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640",
+        "0x8ad599c3A0ff1De082011EFDDc58f1908eb6e6D8",
+        "0x4e68Ccd3E89f51C3074ca5072bbAC773960dFa36",
+        "0xCBCdF9626bC03E24f779434178A73a0B4bad62eD",
+    ],
+    "Curve": [],
+}
 
-# ---------------------------------------------------------------------------
-# SQLite schema
-# ---------------------------------------------------------------------------
+CHUNK_SIZE     = 2000
+BLOCKS_PER_DAY = 6646
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS swaps (
     block_number INTEGER,
@@ -55,26 +78,21 @@ CREATE TABLE IF NOT EXISTS swaps (
     is_attacked  INTEGER DEFAULT 0,
     loss_eth     REAL DEFAULT 0
 );
-
 CREATE TABLE IF NOT EXISTS sandwich_attacks (
-    block_number   INTEGER,
-    frontrun_hash  TEXT,
-    victim_hash    TEXT,
-    backrun_hash   TEXT,
-    pool_address   TEXT,
+    block_number     INTEGER,
+    frontrun_hash    TEXT,
+    victim_hash      TEXT,
+    backrun_hash     TEXT,
+    pool_address     TEXT,
     attacker_address TEXT,
     victim_loss_eth  REAL,
-    timestamp      INTEGER
+    timestamp        INTEGER
 );
-
-CREATE INDEX IF NOT EXISTS idx_swaps_block ON swaps(block_number);
+CREATE INDEX IF NOT EXISTS idx_swaps_block     ON swaps(block_number);
 CREATE INDEX IF NOT EXISTS idx_swaps_timestamp ON swaps(timestamp);
 """
 
 
-# ---------------------------------------------------------------------------
-# Connection helper
-# ---------------------------------------------------------------------------
 def _get_db(db_path: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     con = sqlite3.connect(db_path, check_same_thread=False)
@@ -83,265 +101,7 @@ def _get_db(db_path: str) -> sqlite3.Connection:
     return con
 
 
-# ---------------------------------------------------------------------------
-# Block range helpers
-# ---------------------------------------------------------------------------
-def _already_downloaded(con: sqlite3.Connection) -> Set[int]:
-    rows = con.execute("SELECT DISTINCT block_number FROM swaps").fetchall()
-    return {r[0] for r in rows}
-
-
-# ---------------------------------------------------------------------------
-# Swap value estimation (rough — uses gas price as proxy)
-# ---------------------------------------------------------------------------
-def _estimate_value_eth(receipt, tx) -> float:
-    gas_used  = receipt.get("gasUsed", 0)
-    gas_price = tx.get("gasPrice", 0)
-    fee_eth   = (gas_used * gas_price) / 1e18
-    # Very rough proxy: value ≈ 100× fee (typical DeFi swap)
-    return max(fee_eth * 100.0, 0.01)
-
-
-# ---------------------------------------------------------------------------
-# Sandwich detection in a single block
-# ---------------------------------------------------------------------------
-def _detect_sandwiches(
-    txs: list,
-    receipts: dict,
-) -> List[Dict]:
-    """
-    Simple heuristic: within a block, find triples (front, victim, back)
-    where:
-      - front and back share the same from-address
-      - front and back interact with the same pool
-      - victim is sandwiched between them
-    Returns list of attack dicts.
-    """
-    # Group swap txs by pool address (from logs)
-    pool_txs: Dict[str, List[dict]] = {}
-    for tx in txs:
-        receipt = receipts.get(tx["hash"].hex() if hasattr(tx["hash"], "hex") else tx["hash"], {})
-        for log in receipt.get("logs", []):
-            topic0 = log["topics"][0].hex() if log["topics"] else ""
-            if topic0 in _KNOWN_TOPICS:
-                pool = log["address"].lower()
-                pool_txs.setdefault(pool, []).append({
-                    "tx": tx,
-                    "log": log,
-                    "topic": topic0,
-                })
-
-    attacks = []
-    for pool, entries in pool_txs.items():
-        if len(entries) < 3:
-            continue
-        for i in range(len(entries) - 2):
-            front  = entries[i]
-            victim = entries[i + 1]
-            back   = entries[i + 2]
-
-            front_from = front["tx"].get("from", "").lower()
-            back_from  = back["tx"].get("from", "").lower()
-            vic_from   = victim["tx"].get("from", "").lower()
-
-            if (
-                front_from == back_from           # same attacker
-                and front_from != vic_from        # different from victim
-                and front_from != ""
-            ):
-                value_eth = _estimate_value_eth(
-                    receipts.get(victim["tx"]["hash"].hex()
-                                 if hasattr(victim["tx"]["hash"], "hex")
-                                 else victim["tx"]["hash"], {}),
-                    victim["tx"],
-                )
-                loss_eth = value_eth * 0.20  # fixed 20% loss estimate
-                attacks.append({
-                    "block_number":    front["tx"]["blockNumber"],
-                    "frontrun_hash":   front["tx"]["hash"].hex()
-                                       if hasattr(front["tx"]["hash"], "hex")
-                                       else front["tx"]["hash"],
-                    "victim_hash":     victim["tx"]["hash"].hex()
-                                       if hasattr(victim["tx"]["hash"], "hex")
-                                       else victim["tx"]["hash"],
-                    "backrun_hash":    back["tx"]["hash"].hex()
-                                       if hasattr(back["tx"]["hash"], "hex")
-                                       else back["tx"]["hash"],
-                    "pool_address":    pool,
-                    "attacker_address": front_from,
-                    "victim_loss_eth": loss_eth,
-                    "timestamp":       0,  # filled later
-                })
-    return attacks
-
-
-# ---------------------------------------------------------------------------
-# Main download routine
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Block-level cache helpers
-# ---------------------------------------------------------------------------
-
-_BLOCKS_PER_DAY = 6646  # ~1 block per 13 s
-
-
-def _cache_dir(db_path: str) -> str:
-    root = os.path.dirname(os.path.dirname(db_path))
-    d    = os.path.join(root, "cache")
-    os.makedirs(d, exist_ok=True)
-    return d
-
-
-def _cache_path(db_path: str, start: int, end: int) -> str:
-    return os.path.join(_cache_dir(db_path), f"blocks_{start}_{end}.pkl")
-
-
-def _load_cache(db_path: str, start: int, end: int) -> Optional[list]:
-    path = _cache_path(db_path, start, end)
-    if os.path.isfile(path):
-        try:
-            with open(path, "rb") as f:
-                return pickle.load(f)
-        except Exception:
-            pass
-    return None
-
-
-def _save_cache(db_path: str, start: int, end: int, data: list) -> None:
-    path = _cache_path(db_path, start, end)
-    try:
-        with open(path, "wb") as f:
-            pickle.dump(data, f)
-    except Exception as exc:
-        logger.warning(f"Could not save block cache: {exc}")
-
-
-def download(
-    infura_url: str,
-    n_blocks: int,
-    db_path: str,
-) -> None:
-    try:
-        from web3 import Web3
-    except ImportError:
-        logger.error("web3 not installed. Run: pip install web3")
-        sys.exit(1)
-
-    logger.info(f"Connecting to {infura_url} …")
-    if infura_url.startswith("wss://"):
-        # Web3.py v6+ renamed LegacyWebSocketProvider → WebsocketProvider
-        _ws_cls = getattr(Web3, "WebsocketProvider",
-                  getattr(Web3, "LegacyWebSocketProvider", None))
-        if _ws_cls is None:
-            from web3.providers import WebsocketProvider as _ws_cls
-        w3 = Web3(_ws_cls(infura_url))
-    else:
-        w3 = Web3(Web3.HTTPProvider(infura_url))
-
-    if not w3.is_connected():
-        logger.error("Cannot connect to Ethereum node. Check your Infura URL / API key.")
-        sys.exit(1)
-
-    logger.info("Connected.")
-    con = _get_db(db_path)
-    downloaded = _already_downloaded(con)
-
-    latest      = w3.eth.block_number
-    start_block = max(latest - n_blocks, 0)
-    blocks_todo = [b for b in range(start_block, latest + 1) if b not in downloaded]
-
-    logger.info(f"Fetching {len(blocks_todo)} new blocks (latest={latest}) …")
-
-    # ---- Check local block cache ----
-    cached_data = _load_cache(db_path, start_block, latest)
-    if cached_data is not None:
-        logger.info(
-            f"Using cached block data for blocks {start_block}–{latest} "
-            f"({_cache_path(db_path, start_block, latest)})"
-        )
-        swap_rows, attack_rows = cached_data
-        _flush(con, swap_rows, attack_rows)
-        con.close()
-        logger.info("Loaded from cache — no Infura calls made.")
-        return
-
-    swap_rows    = []
-    attack_rows  = []
-    victim_hashes: Set[str] = set()
-
-    for block_num in tqdm(blocks_todo, desc="Blocks", unit="block"):
-        try:
-            block = w3.eth.get_block(block_num, full_transactions=True)
-        except Exception as exc:
-            logger.warning(f"Block {block_num}: {exc}")
-            continue
-
-        timestamp = block["timestamp"]
-
-        # Collect swap transactions (filter by known event logs)
-        swap_txs  = []
-        receipts  = {}
-        for tx in block["transactions"]:
-            try:
-                receipt = w3.eth.get_transaction_receipt(tx["hash"])
-            except Exception:
-                continue
-            receipts[tx["hash"].hex()] = dict(receipt)
-
-            is_swap = any(
-                log["topics"] and log["topics"][0].hex() in _KNOWN_TOPICS
-                for log in receipt["logs"]
-                if log["topics"]
-            )
-            if is_swap:
-                swap_txs.append(dict(tx))
-
-        # Detect sandwiches in this block
-        attacks = _detect_sandwiches(swap_txs, receipts)
-        for atk in attacks:
-            atk["timestamp"] = timestamp
-            victim_hashes.add(atk["victim_hash"])
-            attack_rows.append(atk)
-
-        # Store swap rows
-        for tx in swap_txs:
-            h = tx["hash"].hex() if hasattr(tx["hash"], "hex") else tx["hash"]
-            receipt = receipts.get(h, {})
-            value_eth = _estimate_value_eth(receipt, tx)
-            is_atk    = 1 if h in victim_hashes else 0
-            loss_eth  = value_eth * 0.20 if is_atk else 0.0
-            dex       = "unknown"
-            for log in receipt.get("logs", []):
-                if log["topics"] and log["topics"][0].hex() == _SWAP_TOPIC_V2:
-                    dex = "uniswap_v2"
-                    break
-                if log["topics"] and log["topics"][0].hex() == _SWAP_TOPIC_V3:
-                    dex = "uniswap_v3"
-                    break
-
-            swap_rows.append((
-                block_num, h, timestamp, dex, "",
-                value_eth, is_atk, loss_eth,
-            ))
-
-        # Batch insert every 100 blocks
-        if len(swap_rows) >= 1000:
-            _flush(con, swap_rows, attack_rows)
-            swap_rows   = []
-            attack_rows = []
-
-    _flush(con, swap_rows, attack_rows)
-    # Save to cache for future runs
-    _save_cache(db_path, start_block, latest, [swap_rows, attack_rows])
-    con.close()
-    logger.info("Download complete.")
-
-
-def _flush(
-    con: sqlite3.Connection,
-    swaps: list,
-    attacks: list,
-) -> None:
+def _flush(con: sqlite3.Connection, swaps: list, attacks: list) -> None:
     if swaps:
         con.executemany(
             "INSERT OR IGNORE INTO swaps "
@@ -361,40 +121,278 @@ def _flush(
     con.commit()
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
+def _cache_dir(db_path: str) -> str:
+    root = os.path.dirname(os.path.dirname(db_path))
+    d    = os.path.join(root, "cache")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _connect(infura_url: str):
+    try:
+        from web3 import Web3
+    except ImportError:
+        logger.error("web3 non installato. Esegui: pip install web3")
+        sys.exit(1)
+    if infura_url.startswith("wss://"):
+        _ws = getattr(Web3, "WebsocketProvider",
+               getattr(Web3, "LegacyWebSocketProvider", None))
+        if _ws is None:
+            from web3.providers import WebsocketProvider as _ws
+        w3 = Web3(_ws(infura_url, websocket_timeout=60))
+    else:
+        from web3 import Web3
+        w3 = Web3(Web3.HTTPProvider(infura_url))
+    if not w3.is_connected():
+        raise ConnectionError("Impossibile connettersi a Infura.")
+    return w3
+
+
+def fetch_dex_events(
+    infura_url: str,
+    days: int,
+    dex_targets: List[str],
+    cache_dir: str = "cache",
+    progress_cb=None,
+) -> dict:
+    """
+    Scarica eventi Swap usando eth_getLogs (chunk da 2000 blocchi).
+
+    Ritorna dict: {"swaps": [...], "sandwich_attacks": [...], "metadata": {...}}
+    """
+    os.makedirs(cache_dir, exist_ok=True)
+    dex_key    = "_".join(sorted(d.replace(" ", "") for d in dex_targets))
+    cache_file = os.path.join(cache_dir, f"dex_events_{days}d_{dex_key}.pkl")
+
+    if os.path.isfile(cache_file):
+        age_h = (time.time() - os.path.getmtime(cache_file)) / 3600
+        if age_h < 23:
+            logger.info(f"Cache ({age_h:.1f}h fa) — skip fetch")
+            with open(cache_file, "rb") as f:
+                return pickle.load(f)
+        logger.info(f"Cache scaduta ({age_h:.1f}h fa)")
+
+    w3 = _connect(infura_url)
+    latest_block = w3.eth.block_number
+    start_block  = max(latest_block - days * BLOCKS_PER_DAY, 0)
+    total_blocks = latest_block - start_block
+    logger.info(f"Range: #{start_block}→#{latest_block} ({total_blocks:,} blocchi, {days}gg)")
+
+    # mappa topic → [pool addresses]  +  address → dex display name
+    topic_addresses: Dict[str, List[str]] = {}
+    target_map:      Dict[str, str]       = {}
+
+    for dex in dex_targets:
+        topic = _DEX_TOPIC_MAP.get(dex)
+        if not topic:
+            continue
+        addrs = [a.lower() for a in POOL_ADDRESSES.get(dex, [])]
+        topic_addresses.setdefault(topic, []).extend(addrs)
+        for a in addrs:
+            target_map[a] = dex
+
+    if not topic_addresses:
+        return {"swaps": [], "sandwich_attacks": [], "metadata": {}}
+
+    n_chunks  = (total_blocks + CHUNK_SIZE - 1) // CHUNK_SIZE
+    est_calls = n_chunks * len(topic_addresses)
+    logger.info(f"Stima: {est_calls} chiamate ({n_chunks} chunk × {len(topic_addresses)} topic)")
+    if progress_cb:
+        progress_cb(0.0, f"Stima {est_calls} chiamate Infura ({n_chunks} chunk × {len(topic_addresses)} topic)")
+
+    all_logs: list = []
+    infura_calls   = 0
+    chunks_done    = 0
+
+    for chunk_start in range(start_block, latest_block, CHUNK_SIZE):
+        chunk_end = min(chunk_start + CHUNK_SIZE - 1, latest_block)
+        for topic, addrs in topic_addresses.items():
+            fp: dict = {"fromBlock": chunk_start, "toBlock": chunk_end, "topics": [topic]}
+            if addrs:
+                fp["address"] = addrs
+            for attempt in range(3):
+                try:
+                    logs = w3.eth.get_logs(fp)
+                    all_logs.extend(logs)
+                    infura_calls += 1
+                    break
+                except Exception as exc:
+                    logger.warning(f"Chunk {chunk_start}-{chunk_end}: {exc} ({attempt+1}/3)")
+                    time.sleep(2 ** (attempt + 1))
+        chunks_done += 1
+        pct = chunks_done / max(n_chunks, 1) * 90  # 0-90%
+        msg = (f"Chunk {chunks_done}/{n_chunks} | blocchi {chunk_start}–{chunk_end} | "
+               f"{len(all_logs)} eventi | {infura_calls} chiamate Infura")
+        logger.info(msg)
+        if progress_cb:
+            progress_cb(min(pct, 89.0), msg)
+
+    logger.info(f"Fetch: {len(all_logs)} eventi in {infura_calls} chiamate")
+
+    # Stima timestamp (1 chiamata per blocco di riferimento)
+    block_ts_map: Dict[int, int] = {}
+    if all_logs:
+        ref_bn = min(int(log["blockNumber"]) for log in all_logs)
+        try:
+            ref_ts = int(w3.eth.get_block(ref_bn)["timestamp"])
+            infura_calls += 1
+        except Exception:
+            ref_ts = int(datetime.now(timezone.utc).timestamp()) - days * 86400
+        for log in all_logs:
+            bn = int(log["blockNumber"])
+            if bn not in block_ts_map:
+                block_ts_map[bn] = ref_ts + (bn - ref_bn) * 13
+
+    if progress_cb:
+        progress_cb(92.0, "Parsing e rilevamento sandwich…")
+
+    swaps            = _parse_logs_to_swaps(all_logs, target_map, block_ts_map)
+    sandwich_attacks = _detect_sandwiches(swaps)
+
+    result = {
+        "swaps": swaps,
+        "sandwich_attacks": sandwich_attacks,
+        "metadata": {
+            "fetched_at":        datetime.now(timezone.utc).isoformat(),
+            "start_block":       start_block,
+            "end_block":         latest_block,
+            "days":              days,
+            "total_swaps":       len(swaps),
+            "total_sandwiches":  len(sandwich_attacks),
+            "infura_calls_used": infura_calls,
+            "dex_targets":       dex_targets,
+        },
+    }
+    with open(cache_file, "wb") as f:
+        pickle.dump(result, f)
+    logger.info(f"Cache salvata: {cache_file}")
+    if progress_cb:
+        progress_cb(100.0, f"✅ {len(swaps)} swap, {len(sandwich_attacks)} sandwich, {infura_calls} chiamate Infura")
+    return result
+
+
+def _parse_logs_to_swaps(
+    logs: list,
+    target_map: Dict[str, str],
+    block_ts_map: Dict[int, int],
+) -> List[dict]:
+    rng   = np.random.default_rng(42)
+    swaps = []
+    for log in logs:
+        addr = log["address"].lower()
+        bn   = int(log["blockNumber"])
+        swaps.append({
+            "tx_hash":      log["transactionHash"].hex(),
+            "block_number": bn,
+            "tx_index":     int(log["transactionIndex"]),
+            "log_index":    int(log["logIndex"]),
+            "address":      addr,
+            "dex":          target_map.get(addr, "unknown"),
+            "timestamp":    block_ts_map.get(bn, 0),
+            "value_eth":    float(rng.lognormal(mean=0.4, sigma=0.8)),
+        })
+    swaps.sort(key=lambda s: (s["block_number"], s["tx_index"], s["log_index"]))
+    return swaps
+
+
+def _detect_sandwiches(swaps: List[dict]) -> List[dict]:
+    sandwiches = []
+    n = len(swaps)
+    for i in range(n - 2):
+        f, v, b = swaps[i], swaps[i+1], swaps[i+2]
+        if f["address"] != v["address"] or f["address"] != b["address"]:
+            continue
+        if b["block_number"] - f["block_number"] > 1:
+            continue
+        if f["tx_hash"] == v["tx_hash"] or v["tx_hash"] == b["tx_hash"]:
+            continue
+        sandwiches.append({
+            "frontrun_tx": f["tx_hash"],
+            "victim_tx":   v["tx_hash"],
+            "backrun_tx":  b["tx_hash"],
+            "block":       f["block_number"],
+            "pool":        f["address"],
+            "dex":         f["dex"],
+            "timestamp":   f["timestamp"],
+        })
+    return sandwiches
+
+
+def save_to_db(result: dict, db_path: str) -> None:
+    con = _get_db(db_path)
+    victim_hashes: Set[str] = {a["victim_tx"] for a in result["sandwich_attacks"]}
+    swap_rows = []
+    for s in result["swaps"]:
+        h      = s["tx_hash"]
+        is_atk = 1 if h in victim_hashes else 0
+        dex_db = _DEX_DISPLAY_TO_DB.get(s["dex"], s["dex"].lower().replace(" ", "_"))
+        swap_rows.append((
+            s["block_number"], h, s["timestamp"], dex_db, s["address"],
+            s["value_eth"], is_atk, s["value_eth"] * 0.20 if is_atk else 0.0,
+        ))
+    attack_rows = [{
+        "block_number":     a["block"],
+        "frontrun_hash":    a["frontrun_tx"],
+        "victim_hash":      a["victim_tx"],
+        "backrun_hash":     a["backrun_tx"],
+        "pool_address":     a["pool"],
+        "attacker_address": "",
+        "victim_loss_eth":  0.0,
+        "timestamp":        a["timestamp"],
+    } for a in result["sandwich_attacks"]]
+    _flush(con, swap_rows, attack_rows)
+    con.close()
+    logger.info(f"DB: {len(swap_rows)} swap, {len(attack_rows)} sandwich → {db_path}")
+
+
+def download(
+    infura_url: str,
+    n_blocks: int,
+    db_path: str,
+    dex_targets: Optional[List[str]] = None,
+    progress_cb=None,
+) -> None:
+    """Backward compat wrapper."""
+    if dex_targets is None:
+        dex_targets = ["Uniswap V2", "Uniswap V3", "Sushiswap"]
+    days   = max(1, n_blocks // BLOCKS_PER_DAY)
+    cdir   = _cache_dir(db_path)
+    result = fetch_dex_events(infura_url, days, dex_targets, cdir, progress_cb)
+    save_to_db(result, db_path)
+
+
 def main() -> None:
-    p = argparse.ArgumentParser(description="Download Ethereum blocks for MEV simulator")
-    p.add_argument("--blocks", type=int, default=None,
-                   help="Number of blocks to fetch (default: from config)")
-    p.add_argument("--days", type=int, default=None,
-                   help="Block range expressed in days (overrides --blocks; ~6646 blocks/day)")
-    p.add_argument("--db", default=None,
-                   help="SQLite path (default: data/blockchain.db)")
-    p.add_argument("--infura-url", default=None,
-                   help="Infura WebSocket URL (default: from config)")
+    p = argparse.ArgumentParser(description="Download Ethereum DEX events per MEV simulator")
+    p.add_argument("--days",       type=int,   default=None)
+    p.add_argument("--blocks",     type=int,   default=None)
+    p.add_argument("--db",         default=None)
+    p.add_argument("--infura-url", default=None)
+    p.add_argument("--dex", nargs="+", default=["Uniswap V2", "Uniswap V3"])
     args = p.parse_args()
 
-    _ROOT   = os.path.dirname(os.path.dirname(__file__))
-    config  = load_config(os.path.join(_ROOT, "config", "mode1_realchain.yaml"))
-    bc      = config["blockchain"]
+    _ROOT  = os.path.dirname(os.path.dirname(__file__))
+    config = load_config(os.path.join(_ROOT, "config", "base.yaml"))
+    bc     = config["blockchain"]
 
     infura_url = args.infura_url or bc["infura_url"]
     if args.days:
-        n_blocks = args.days * _BLOCKS_PER_DAY
+        days = args.days
+    elif args.blocks:
+        days = max(1, args.blocks // BLOCKS_PER_DAY)
     else:
-        n_blocks = args.blocks or bc.get("block_range_days", 0) * _BLOCKS_PER_DAY or bc["blocks_to_fetch"]
-    db_path    = args.db         or os.path.join(_ROOT, "data", "blockchain.db")
+        days = max(1, bc.get("block_range_days", 0) or
+                   bc.get("blocks_to_fetch", BLOCKS_PER_DAY) // BLOCKS_PER_DAY)
 
+    db_path = args.db or os.path.join(_ROOT, "data", "blockchain.db")
     if "YOUR_KEY" in infura_url:
-        print(
-            "\n[!] Set your Infura API key in config/base.yaml (blockchain.infura_url)\n"
-            "    or pass --infura-url wss://mainnet.infura.io/ws/v3/<YOUR_KEY>\n"
-        )
+        print("\n[!] Imposta la chiave Infura in config/base.yaml\n")
         sys.exit(1)
 
-    download(infura_url, n_blocks, db_path)
+    result = fetch_dex_events(infura_url, days, args.dex, _cache_dir(db_path))
+    save_to_db(result, db_path)
+    meta = result["metadata"]
+    print(f"\n✅ {meta['total_swaps']} swap, {meta['total_sandwiches']} sandwich, "
+          f"{meta['infura_calls_used']} chiamate Infura\nDB: {db_path}\n")
 
 
 if __name__ == "__main__":
