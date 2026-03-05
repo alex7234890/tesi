@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import pickle
 import sqlite3
 import sys
 import time
@@ -177,6 +178,44 @@ def _detect_sandwiches(
 # ---------------------------------------------------------------------------
 # Main download routine
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Block-level cache helpers
+# ---------------------------------------------------------------------------
+
+_BLOCKS_PER_DAY = 6646  # ~1 block per 13 s
+
+
+def _cache_dir(db_path: str) -> str:
+    root = os.path.dirname(os.path.dirname(db_path))
+    d    = os.path.join(root, "cache")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _cache_path(db_path: str, start: int, end: int) -> str:
+    return os.path.join(_cache_dir(db_path), f"blocks_{start}_{end}.pkl")
+
+
+def _load_cache(db_path: str, start: int, end: int) -> Optional[list]:
+    path = _cache_path(db_path, start, end)
+    if os.path.isfile(path):
+        try:
+            with open(path, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            pass
+    return None
+
+
+def _save_cache(db_path: str, start: int, end: int, data: list) -> None:
+    path = _cache_path(db_path, start, end)
+    try:
+        with open(path, "wb") as f:
+            pickle.dump(data, f)
+    except Exception as exc:
+        logger.warning(f"Could not save block cache: {exc}")
+
+
 def download(
     infura_url: str,
     n_blocks: int,
@@ -207,6 +246,19 @@ def download(
     blocks_todo = [b for b in range(start_block, latest + 1) if b not in downloaded]
 
     logger.info(f"Fetching {len(blocks_todo)} new blocks (latest={latest}) …")
+
+    # ---- Check local block cache ----
+    cached_data = _load_cache(db_path, start_block, latest)
+    if cached_data is not None:
+        logger.info(
+            f"Using cached block data for blocks {start_block}–{latest} "
+            f"({_cache_path(db_path, start_block, latest)})"
+        )
+        swap_rows, attack_rows = cached_data
+        _flush(con, swap_rows, attack_rows)
+        con.close()
+        logger.info("Loaded from cache — no Infura calls made.")
+        return
 
     swap_rows    = []
     attack_rows  = []
@@ -274,6 +326,8 @@ def download(
             attack_rows = []
 
     _flush(con, swap_rows, attack_rows)
+    # Save to cache for future runs
+    _save_cache(db_path, start_block, latest, [swap_rows, attack_rows])
     con.close()
     logger.info("Download complete.")
 
@@ -309,6 +363,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description="Download Ethereum blocks for MEV simulator")
     p.add_argument("--blocks", type=int, default=None,
                    help="Number of blocks to fetch (default: from config)")
+    p.add_argument("--days", type=int, default=None,
+                   help="Block range expressed in days (overrides --blocks; ~6646 blocks/day)")
     p.add_argument("--db", default=None,
                    help="SQLite path (default: data/blockchain.db)")
     p.add_argument("--infura-url", default=None,
@@ -320,7 +376,10 @@ def main() -> None:
     bc      = config["blockchain"]
 
     infura_url = args.infura_url or bc["infura_url"]
-    n_blocks   = args.blocks     or bc["blocks_to_fetch"]
+    if args.days:
+        n_blocks = args.days * _BLOCKS_PER_DAY
+    else:
+        n_blocks = args.blocks or bc.get("block_range_days", 0) * _BLOCKS_PER_DAY or bc["blocks_to_fetch"]
     db_path    = args.db         or os.path.join(_ROOT, "data", "blockchain.db")
 
     if "YOUR_KEY" in infura_url:
