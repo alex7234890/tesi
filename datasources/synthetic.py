@@ -73,7 +73,8 @@ class SyntheticDataSource(BaseDataSource):
         self._patt_history: List[float] = self._load_patt_history()
         self._users: Dict[str, UserState] = {}
         self._next_user_id: int = 0
-        self._spawn_users(self.initial_count)
+        initial_tier_dist = config.get("users", {}).get("initial_tier_distribution")
+        self._spawn_users(self.initial_count, tier_dist=initial_tier_dist)
 
     # ------------------------------------------------------------------
     # Patt loading
@@ -102,16 +103,36 @@ class SyntheticDataSource(BaseDataSource):
     # User management
     # ------------------------------------------------------------------
 
-    def _spawn_users(self, n: int) -> None:
-        for _ in range(n):
+    def _spawn_users(self, n: int, tier_dist: dict | None = None) -> None:
+        """Spawn *n* users, optionally assigning initial tiers from *tier_dist*.
+
+        *tier_dist* is a dict {"bronze": f, "silver": f, "gold": f, "platinum": f}
+        where values are fractions summing to 1.  When None, all users start as Bronze.
+        """
+        tiers_list: list[str] = []
+        if tier_dist:
+            # Build a weighted list of initial tiers
+            for tier_name, frac in tier_dist.items():
+                count = max(0, round(frac * n))
+                tiers_list.extend([tier_name] * count)
+            # Pad or trim to exactly n
+            while len(tiers_list) < n:
+                tiers_list.append("bronze")
+            tiers_list = tiers_list[:n]
+            self.rng.shuffle(tiers_list)  # type: ignore[arg-type]
+
+        for i in range(n):
             uid = f"user_{self._next_user_id:06d}"
             self._next_user_id += 1
             is_fraud = self.rng.random() < self.fraud_rate
-            self._users[uid] = UserState(user_id=uid, is_fraudulent=is_fraud)
+            initial_tier = tiers_list[i] if tiers_list else "bronze"
+            self._users[uid] = UserState(
+                user_id=uid, is_fraudulent=is_fraud, tier=initial_tier,
+            )
 
     def _grow_users(self) -> None:
         n_new = max(1, int(len(self._users) * self.growth_rate_daily))
-        self._spawn_users(n_new)
+        self._spawn_users(n_new, tier_dist=None)  # new organic users always start as Bronze
 
     # ------------------------------------------------------------------
     # Coverage assignment
