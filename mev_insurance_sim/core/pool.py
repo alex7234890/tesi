@@ -98,6 +98,10 @@ class InsurancePool:
         return self.mbase + self.get_madj()
 
     @property
+    def pending_liabilities_eth(self) -> float:
+        return max(sum(self._pending_claims) + self._expected_claims_7d(), 0.0)
+
+    @property
     def profit_eth(self) -> float:
         return (
             self.total_premiums_eth

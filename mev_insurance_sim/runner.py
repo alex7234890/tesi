@@ -98,7 +98,7 @@ def run_single(
     if mode == 1:
         ds = BlockchainDataSource(config, db_path, rng, coverage=coverage)
     else:
-        ds = SyntheticDataSource(config, db_path, rng)
+        ds = SyntheticDataSource(config, db_path, rng, coverage=coverage)
 
     duration = ds.get_duration_days()
     logger.info(f"Starting simulation  mode={mode}  coverage={coverage}  days={duration}")
@@ -112,6 +112,11 @@ def run_single(
 
     # User states (for mode 2 we get them from the datasource)
     users = getattr(ds, "users", {})
+
+    # Cumulative totals from previous day (for daily delta computation)
+    prev_total_premiums:       float = 0.0
+    prev_total_payouts:        float = 0.0
+    prev_total_oracle_rewards: float = 0.0
 
     # -----------------------------------------------------------------
     # Main simulation loop
@@ -129,8 +134,9 @@ def run_single(
         e       = config["fraud_detection"]["false_negative_rate"]
         l_pct   = config["market"]["loss_pct_mean"]
 
-        today_tint:  float = 0.0
+        today_tint:   float = 0.0
         today_claims        = []
+        today_swap_details  = []
 
         for swap in swaps:
             if swap.user_id in blacklisted:
@@ -150,6 +156,21 @@ def run_single(
             pool.add_premium(premium)
             pool.register_policy()
 
+            # Start building swap detail record
+            swap_detail: dict = {
+                "swap_id":        swap.tx_hash,
+                "value_ETH":      swap.value_eth,
+                "was_attacked":   swap.is_attacked,
+                "insured":        True,
+                "coverage_level": swap.coverage,
+                "premium_paid":   premium,
+                "claim_submitted": False,
+                "claim_approved":  False,
+                "payout_ETH":     0.0,
+                "fraud_score":    None,
+                "rejection_reason": "",
+            }
+
             # ---- Claim if attacked ----
             if swap.is_attacked:
                 # Get user state
@@ -166,6 +187,12 @@ def run_single(
                 )
                 pool.resolve_pending_claim(swap.loss_eth)
                 today_claims.append(claim)
+
+                swap_detail["claim_submitted"]   = True
+                swap_detail["claim_approved"]    = claim.decision == "approved"
+                swap_detail["payout_ETH"]        = claim.payout_eth
+                swap_detail["fraud_score"]        = claim.final_score
+                swap_detail["rejection_reason"]  = claim.rejection_reason or ""
 
                 if claim.decision == "approved":
                     pool.add_payout(claim.payout_eth)
@@ -187,6 +214,8 @@ def run_single(
                     user.avg_fraud_score = float(
                         sum(user.fraud_score_history) / len(user.fraud_score_history)
                     )
+
+            today_swap_details.append(swap_detail)
 
         # ---- Oracle daily rewards ----
         oracle_rewards = oracle_net.distribute_daily_rewards(day)
@@ -212,6 +241,14 @@ def run_single(
         prev_tint  = today_tint
         prev_vbase = max(len(swaps), 1)
 
+        # ---- Compute daily flow deltas ----
+        premiums_today       = pool.total_premiums_eth       - prev_total_premiums
+        payouts_today        = pool.total_payouts_eth        - prev_total_payouts
+        oracle_rewards_today = pool.total_oracle_rewards_eth - prev_total_oracle_rewards
+        prev_total_premiums       = pool.total_premiums_eth
+        prev_total_payouts        = pool.total_payouts_eth
+        prev_total_oracle_rewards = pool.total_oracle_rewards_eth
+
         # ---- Collect metrics ----
         collector.collect(
             day=day,
@@ -223,6 +260,11 @@ def run_single(
             mode=mode,
             users=users if mode == 2 else None,
             n_upgrades=n_upgrades,
+            premiums_today=premiums_today,
+            payouts_today=payouts_today,
+            oracle_rewards_today=oracle_rewards_today,
+            pending_liabilities_eth=pool.pending_liabilities_eth,
+            swap_details=today_swap_details,
         )
 
     logger.info("Simulation complete.")

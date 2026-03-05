@@ -35,8 +35,9 @@ class Claim:
     fraud_score: int
     oracle_scores: List[int]
     final_score: int
-    decision: str           # "approved" | "captcha_pass" | "rejected"
+    decision: str                        # "approved" | "rejected"
     payout_eth: float
+    rejection_reason: Optional[str] = None  # "fraud_score_gt_80" | "pattern_invalid" | "captcha_failed"
 
 
 class ClaimProcessor:
@@ -89,7 +90,23 @@ class ClaimProcessor:
             int(np.median(oracle_scores)) if oracle_scores else raw_score
         )
 
-        # Step 4: initial decision
+        # Step 4: initial decision + assign pending rejection reason
+        _fd_cfg = self.fraud_detector._dec
+        rejection_reason: Optional[str] = None
+        if final_score > _fd_cfg["auto_reject"]:       # > 80
+            _pending_reason = "fraud_score_gt_80"
+        elif final_score >= _fd_cfg["captcha_low"]:    # >= 60
+            _pending_reason = "captcha_failed"
+        else:
+            # score < 60: bronze/silver get captcha due to tier pattern
+            if (
+                swap.user_tier is not None
+                and swap.user_tier not in ("gold", "platinum")
+            ):
+                _pending_reason = "pattern_invalid"
+            else:
+                _pending_reason = ""
+
         decision = self.fraud_detector.get_decision(final_score, swap.user_tier)
 
         # Step 5: captcha simulation
@@ -100,6 +117,9 @@ class ClaimProcessor:
                 else self._captcha_pass_honest
             )
             decision = "approved" if self.rng.random() < pass_prob else "rejected"
+
+        if decision == "rejected":
+            rejection_reason = _pending_reason if _pending_reason else "fraud_score_gt_80"
 
         # Step 6: compute payout
         if decision == "approved":
@@ -129,6 +149,7 @@ class ClaimProcessor:
             final_score=final_score,
             decision=decision,
             payout_eth=payout,
+            rejection_reason=rejection_reason,
         )
 
     # ------------------------------------------------------------------

@@ -50,6 +50,7 @@ class SyntheticDataSource(BaseDataSource):
         config: dict,
         db_path: str,
         rng: np.random.Generator,
+        coverage: Optional[str] = None,
     ) -> None:
         super().__init__(config, db_path, rng)
         self.duration_days: int = config["simulation"]["duration_days"]
@@ -65,6 +66,9 @@ class SyntheticDataSource(BaseDataSource):
         self.fraud_rate: float         = uc["fraud_rate"]
         self.swap_freq_mean: float     = uc["swap_frequency_mean"]
         self.coverage_dist: dict       = uc["coverage_distribution"]
+
+        # If set, all swaps use this coverage level instead of random distribution
+        self._default_coverage: Optional[str] = coverage.lower() if coverage else None
 
         self._patt_history: List[float] = self._load_patt_history()
         self._users: Dict[str, UserState] = {}
@@ -114,6 +118,8 @@ class SyntheticDataSource(BaseDataSource):
     # ------------------------------------------------------------------
 
     def _pick_coverage(self) -> str:
+        if self._default_coverage:
+            return self._default_coverage
         r = self.rng.random()
         if r < self.coverage_dist["low"]:
             return "low"
