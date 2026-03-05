@@ -229,7 +229,12 @@ def download(
 
     logger.info(f"Connecting to {infura_url} …")
     if infura_url.startswith("wss://"):
-        w3 = Web3(Web3.LegacyWebSocketProvider(infura_url))
+        # Web3.py v6+ renamed LegacyWebSocketProvider → WebsocketProvider
+        _ws_cls = getattr(Web3, "WebsocketProvider",
+                  getattr(Web3, "LegacyWebSocketProvider", None))
+        if _ws_cls is None:
+            from web3.providers import WebsocketProvider as _ws_cls
+        w3 = Web3(_ws_cls(infura_url))
     else:
         w3 = Web3(Web3.HTTPProvider(infura_url))
 
