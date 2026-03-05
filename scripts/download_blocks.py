@@ -198,10 +198,12 @@ def fetch_dex_events(
         topic = _DEX_TOPIC_MAP.get(dex)
         if not topic:
             continue
-        addrs = [a.lower() for a in POOL_ADDRESSES.get(dex, [])]
-        topic_addresses.setdefault(topic, []).extend(addrs)
-        for a in addrs:
-            target_map[a] = dex
+        # checksum_addrs → usati nel filtro eth_getLogs (Infura richiede checksum)
+        # target_map     → chiave lowercase per matchare log["address"].lower()
+        checksum_addrs = list(POOL_ADDRESSES.get(dex, []))
+        topic_addresses.setdefault(topic, []).extend(checksum_addrs)
+        for a in checksum_addrs:
+            target_map[a.lower()] = dex
 
     if not topic_addresses:
         return {"swaps": [], "sandwich_attacks": [], "metadata": {}}
