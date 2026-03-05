@@ -7,6 +7,7 @@ Oracle network simulation.
 - Dishonest oracles submit systematically biased scores.
 - Median of submitted scores is the final decision score.
 - Divergence tracking → watchlist → potential slashing.
+- oracle_fraud_enabled=False: all oracles behave honestly, no slashing.
 """
 from __future__ import annotations
 
@@ -38,6 +39,9 @@ class OracleNetwork:
         self._oc     = config["oracles"]
         self._wl     = self._oc["watchlist"]
         self._sl     = self._oc["slashing"]
+
+        # When False: all oracles honest, no watchlist, no slashing
+        self.fraud_enabled: bool = self._oc.get("fraud_enabled", True)
 
         n_total    = self._oc["initial_count"]
         n_honest   = int(n_total * self._oc["honest_rate"])
@@ -71,6 +75,7 @@ class OracleNetwork:
     def get_oracle_scores(self, true_score: int) -> Tuple[List[int], List[Oracle]]:
         """
         Each selected oracle submits a fraud score.
+        When fraud_enabled=False, all oracles behave honestly.
         Returns (list of scores, list of participating oracles).
         """
         selected = self._select_oracles()
@@ -80,14 +85,14 @@ class OracleNetwork:
         for oracle in selected:
             if self.rng.random() > self._oc["availability_rate"]:
                 continue
-            if oracle.is_honest:
-                raw = self.rng.normal(true_score, 5.0)
-            else:
-                # Systematically biased: push toward approval or rejection
+            # Dishonest behaviour only when fraud is enabled
+            if self.fraud_enabled and not oracle.is_honest:
                 if self.rng.random() < 0.5:
                     raw = self.rng.uniform(0, 40)
                 else:
                     raw = self.rng.uniform(90, 130)
+            else:
+                raw = self.rng.normal(true_score, 5.0)
             score = int(np.clip(raw, 0, 130))
             scores.append(score)
             participating.append(oracle)
@@ -102,6 +107,10 @@ class OracleNetwork:
         day: int,
     ) -> None:
         if not scores:
+            return
+        # When fraud is disabled, divergences are zero and no watchlist updates
+        if not self.fraud_enabled:
+            self._last_divergences = [0.0] * len(scores)
             return
         median = int(np.median(scores))
         self._last_divergences = []
@@ -122,7 +131,6 @@ class OracleNetwork:
                         f"Oracle {oracle.oracle_id} added to watchlist (day {day})"
                     )
 
-                # Slashing: watchlist oracle caught again with high divergence
                 if oracle.on_watchlist and div >= 20 and self.rng.random() < 0.10:
                     self._slash(oracle, day)
 
@@ -147,7 +155,6 @@ class OracleNetwork:
             if not oracle.is_active:
                 continue
 
-            # Expire watchlist
             if oracle.on_watchlist and oracle.watchlist_entry_day is not None:
                 if day - oracle.watchlist_entry_day > persistence_days:
                     oracle.on_watchlist = False
@@ -175,11 +182,14 @@ class OracleNetwork:
         watchlist = [o for o in self.oracles if o.on_watchlist]
         rewards   = [o.total_rewards_eth for o in self.oracles if o.claims_processed > 0]
         avg_div   = float(np.mean(self._last_divergences)) if self._last_divergences else 0.0
+        total_stake = sum(o.stake_eth for o in self.oracles if o.is_active)
 
         return {
-            "n_oracles_active":       len(active),
-            "n_oracles_watchlist":    len(watchlist),
-            "n_oracles_slashed":      self.n_slashed,
-            "avg_oracle_divergence":  avg_div,
-            "avg_oracle_reward_eth":  float(np.mean(rewards)) if rewards else 0.0,
+            "n_oracles_active":         len(active),
+            "n_oracles_watchlist":      len(watchlist),
+            "n_oracles_slashed":        self.n_slashed,
+            "avg_oracle_divergence":    avg_div,
+            "avg_oracle_reward_eth":    float(np.mean(rewards)) if rewards else 0.0,
+            "total_slashed_eth_cum":    self.total_slashed_eth,
+            "total_oracle_stake_eth":   total_stake,
         }
