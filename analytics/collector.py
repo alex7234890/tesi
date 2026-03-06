@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from core.pool import InsurancePool
     from core.claim_processor import Claim
-    from core.oracle_network import OracleNetwork
     from datasources.base import Swap
     from datasources.synthetic import UserState
 
@@ -27,15 +26,16 @@ class MetricsCollector:
         pool: "InsurancePool",
         claims: List["Claim"],
         swaps: List["Swap"],
-        oracle_network: "OracleNetwork",
         patt: float,
         mode: int,
         users: Optional[Dict[str, "UserState"]] = None,
         premiums_today: float = 0.0,
         payouts_today: float = 0.0,
-        oracle_rewards_today: float = 0.0,
         pending_liabilities_eth: float = 0.0,
         swap_details: Optional[List[Dict[str, Any]]] = None,
+        tint: float = 8000.0,
+        e: float = 0.20,
+        vbase: float = 100.0,
     ) -> None:
         n_claims   = len(claims)
         n_approved = n_claims  # all claims are approved
@@ -44,7 +44,13 @@ class MetricsCollector:
             sum(c.payout_eth for c in claims) / n_claims if n_claims > 0 else 0.0
         )
 
-        net_flow_today = premiums_today - payouts_today - oracle_rewards_today
+        net_flow_today = premiums_today - payouts_today
+
+        # Formula intermediate values
+        loss_pct = pool.get_m_total()  # not ideal but we don't have it here; dashboard reads from config
+        term1    = patt  # just store patt; term1 = patt * loss_pct computed in dashboard
+        e_safe   = max(min(e, 0.9999), 0.0001)
+        term2    = (tint * (e_safe / (1.0 - e_safe))) / (vbase * 1000.0)
 
         row: Dict[str, Any] = {
             # Tick
@@ -56,16 +62,14 @@ class MetricsCollector:
             "solvency_ratio":               pool.solvency_ratio(),
             "total_premiums_collected_eth": pool.total_premiums_eth,
             "total_payouts_eth":            pool.total_payouts_eth,
-            "total_oracle_rewards_eth":     pool.total_oracle_rewards_eth,
             "profit_eth":                   pool.profit_eth,
             "madj_current":                 pool.get_madj(),
             "m_total_current":              pool.get_m_total(),
 
             # Daily flows
-            "premiums_today":       premiums_today,
-            "payouts_today":        payouts_today,
-            "oracle_rewards_today": oracle_rewards_today,
-            "net_flow_today":       net_flow_today,
+            "premiums_today": premiums_today,
+            "payouts_today":  payouts_today,
+            "net_flow_today": net_flow_today,
 
             # Claim metrics
             "n_claims_submitted": n_claims,
@@ -81,11 +85,13 @@ class MetricsCollector:
                 sum(s.loss_eth for s in swaps if s.is_attacked)
                 / max(sum(1 for s in swaps if s.is_attacked), 1)
             ),
-        }
 
-        # Oracle metrics
-        oracle_metrics = oracle_network.get_metrics()
-        row.update(oracle_metrics)
+            # Premium formula parameters (for Day-by-Day breakdown)
+            "tint_today":  tint,
+            "vbase_today": vbase,
+            "e_today":     e,
+            "term2_today": term2,
+        }
 
         # User metrics (mode 2 only)
         if mode == 2 and users is not None:

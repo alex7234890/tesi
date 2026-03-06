@@ -34,7 +34,6 @@ from utils.logger import get_logger
 
 from core.pool import InsurancePool
 from core.premium import compute_premium
-from core.oracle_network import OracleNetwork
 from core.claim_processor import ClaimProcessor
 
 from datasources.blockchain import BlockchainDataSource
@@ -74,7 +73,6 @@ def run_single(
     # Instantiate components
     # -----------------------------------------------------------------
     pool       = InsurancePool(config)
-    oracle_net = OracleNetwork(config, rng, logger)
 
     claim_proc = ClaimProcessor(
         config=config,
@@ -97,15 +95,21 @@ def run_single(
     logger.info(f"Starting simulation  mode={mode}  coverage={coverage}  days={duration}")
 
     # -----------------------------------------------------------------
+    # Premium formula parameters (from config)
+    # -----------------------------------------------------------------
+    tint_cfg  = float(config.get("market", {}).get("tint",  8000.0))
+    e_cfg     = float(config.get("market", {}).get("e",     0.20))
+    vbase_cfg = float(config.get("market", {}).get("vbase", 100.0))
+
+    # -----------------------------------------------------------------
     # Rolling state across days
     # -----------------------------------------------------------------
     # User states (for mode 2 we get them from the datasource)
     users = getattr(ds, "users", {})
 
     # Cumulative totals from previous day (for daily delta computation)
-    prev_total_premiums:       float = 0.0
-    prev_total_payouts:        float = 0.0
-    prev_total_oracle_rewards: float = 0.0
+    prev_total_premiums: float = 0.0
+    prev_total_payouts:  float = 0.0
 
     # Breakdown tracking
     breakdown_event: dict | None = None
@@ -136,6 +140,9 @@ def run_single(
                 loss_pct=l_pct,
                 m_total=m_total,
                 coverage=swap.coverage,
+                tint=tint_cfg,
+                e=e_cfg,
+                vbase=vbase_cfg,
             )
             pool.add_premium(premium)
             pool.register_policy()
@@ -176,10 +183,6 @@ def run_single(
 
             today_swap_details.append(swap_detail)
 
-        # ---- Oracle daily cost ----
-        oracle_rewards = oracle_net.compute_daily_cost(len(today_claims))
-        pool.add_oracle_reward(oracle_rewards)
-
         # ---- End-of-day accounting ----
         pool.end_of_day()
 
@@ -193,12 +196,10 @@ def run_single(
             already_broken = True
 
         # ---- Compute daily flow deltas ----
-        premiums_today       = pool.total_premiums_eth       - prev_total_premiums
-        payouts_today        = pool.total_payouts_eth        - prev_total_payouts
-        oracle_rewards_today = pool.total_oracle_rewards_eth - prev_total_oracle_rewards
-        prev_total_premiums       = pool.total_premiums_eth
-        prev_total_payouts        = pool.total_payouts_eth
-        prev_total_oracle_rewards = pool.total_oracle_rewards_eth
+        premiums_today = pool.total_premiums_eth - prev_total_premiums
+        payouts_today  = pool.total_payouts_eth  - prev_total_payouts
+        prev_total_premiums = pool.total_premiums_eth
+        prev_total_payouts  = pool.total_payouts_eth
 
         # ---- Collect metrics ----
         collector.collect(
@@ -206,15 +207,16 @@ def run_single(
             pool=pool,
             claims=today_claims,
             swaps=swaps,
-            oracle_network=oracle_net,
             patt=patt,
             mode=mode,
             users=users if mode == 2 else None,
             premiums_today=premiums_today,
             payouts_today=payouts_today,
-            oracle_rewards_today=oracle_rewards_today,
             pending_liabilities_eth=pool.pending_liabilities_eth,
             swap_details=today_swap_details,
+            tint=tint_cfg,
+            e=e_cfg,
+            vbase=vbase_cfg,
         )
 
     logger.info("Simulation complete.")

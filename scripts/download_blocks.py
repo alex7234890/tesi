@@ -261,7 +261,7 @@ def fetch_dex_events(
         progress_cb(92.0, "Parsing e rilevamento sandwich…")
 
     swaps            = _parse_logs_to_swaps(all_logs, target_map, block_ts_map)
-    sandwich_attacks = _detect_sandwiches(swaps)
+    sandwich_attacks = _detect_sandwiches(swaps, w3=w3)
 
     total_sw  = len(swaps)
     total_atk = len(sandwich_attacks)
@@ -321,7 +321,7 @@ def _parse_logs_to_swaps(
     return swaps
 
 
-def _detect_sandwiches(swaps: List[dict]) -> List[dict]:
+def _detect_sandwiches(swaps: List[dict], w3=None) -> List[dict]:
     sandwiches = []
     n = len(swaps)
     for i in range(n - 2):
@@ -332,6 +332,18 @@ def _detect_sandwiches(swaps: List[dict]) -> List[dict]:
             continue
         if f["tx_hash"] == v["tx_hash"] or v["tx_hash"] == b["tx_hash"]:
             continue
+        # Verify via eth_getTransactionByHash: frontrun.from == backrun.from != victim.from
+        if w3 is not None:
+            try:
+                tf = w3.eth.get_transaction(f["tx_hash"])
+                tb = w3.eth.get_transaction(b["tx_hash"])
+                tv = w3.eth.get_transaction(v["tx_hash"])
+                if tf["from"] != tb["from"]:
+                    continue  # frontrun and backrun must share the same sender
+                if tf["from"] == tv["from"]:
+                    continue  # attacker must not be the victim
+            except Exception:
+                continue  # skip unverifiable triples
         sandwiches.append({
             "frontrun_tx": f["tx_hash"],
             "victim_tx":   v["tx_hash"],
