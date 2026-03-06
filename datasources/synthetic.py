@@ -22,14 +22,10 @@ from .base import BaseDataSource, Swap
 @dataclass
 class UserState:
     user_id: str
-    is_fraudulent: bool      = False
-    total_swaps: int         = 0
-    total_claims: int        = 0
-    total_days_active: int   = 0
-    is_blacklisted: bool     = False
-    avg_fraud_score: float   = 0.0
-    fraud_score_history: List[int] = field(default_factory=list)
-    daily_swaps_today: int   = 0
+    total_swaps: int       = 0
+    total_claims: int      = 0
+    total_days_active: int = 0
+    daily_swaps_today: int = 0
 
     @property
     def claim_rate(self) -> float:
@@ -59,12 +55,11 @@ class SyntheticDataSource(BaseDataSource):
         self.patt_osc: float      = mc["patt_oscillation_range"]
 
         uc = config["users"]
-        self.initial_count: int        = uc["initial_count"]
-        self.growth_rate_daily: float  = uc["growth_rate_daily"]
-        self.fraud_rate: float         = uc["fraud_rate"]
-        self.swap_freq_mean: float     = uc["swap_frequency_mean"]
-        self.coverage_dist: dict       = uc["coverage_distribution"]
-        self.max_daily_swaps: int      = int(uc.get("max_daily_swaps", 99))
+        self.initial_count: int       = uc["initial_count"]
+        self.growth_rate_daily: float = uc["growth_rate_daily"]
+        self.swap_freq_mean: float    = uc["swap_frequency_mean"]
+        self.coverage_dist: dict      = uc["coverage_distribution"]
+        self.max_daily_swaps: int     = int(uc.get("max_daily_swaps", 99))
 
         # If set, all swaps use this coverage level instead of random distribution
         self._default_coverage: Optional[str] = coverage.lower() if coverage else None
@@ -96,10 +91,11 @@ class SyntheticDataSource(BaseDataSource):
         override = self.config.get("market", {}).get("attack_rate")
         if override is not None:
             return float(np.clip(override, 0.001, 0.5))
-        idx = day % len(self._patt_history)
-        base = self._patt_history[idx]
+        idx   = day % len(self._patt_history)
+        base  = self._patt_history[idx]
         delta = self.rng.uniform(-self.patt_osc, self.patt_osc)
-        return float(np.clip(base + delta, 0.001, 0.5))
+        noise = self.rng.uniform(0.7, 1.3)
+        return float(np.clip((base + delta) * noise, 0.001, 0.5))
 
     # ------------------------------------------------------------------
     # User management
@@ -109,10 +105,7 @@ class SyntheticDataSource(BaseDataSource):
         for i in range(n):
             uid = f"user_{self._next_user_id:06d}"
             self._next_user_id += 1
-            is_fraud = self.rng.random() < self.fraud_rate
-            self._users[uid] = UserState(
-                user_id=uid, is_fraudulent=is_fraud,
-            )
+            self._users[uid] = UserState(user_id=uid)
 
     def _grow_users(self) -> None:
         n_new = max(1, int(len(self._users) * self.growth_rate_daily))
@@ -141,24 +134,20 @@ class SyntheticDataSource(BaseDataSource):
         if day > 0:
             self._grow_users()
 
-        patt = self.get_patt(day)
+        patt   = self.get_patt(day)
         swaps: List[Swap] = []
 
         # Reset daily swap counter
         for u in self._users.values():
             u.daily_swaps_today = 0
-            if not u.is_blacklisted:
-                u.total_days_active += 1
+            u.total_days_active += 1
 
         for uid, user in list(self._users.items()):
-            if user.is_blacklisted:
-                continue
-
             n_swaps = int(self.rng.poisson(self.swap_freq_mean))
             n_swaps = min(n_swaps, self.max_daily_swaps)
 
             for i in range(n_swaps):
-                value_eth = float(self.rng.lognormal(mean=0.4, sigma=0.8))
+                value_eth   = float(self.rng.lognormal(mean=0.4, sigma=0.8))
                 is_attacked = self.rng.random() < patt
 
                 if is_attacked:
@@ -174,7 +163,7 @@ class SyntheticDataSource(BaseDataSource):
                     loss_eth = 0.0
 
                 coverage = self._pick_coverage()
-                tx = f"0x{uuid.uuid4().hex}"
+                tx       = f"0x{uuid.uuid4().hex}"
 
                 swaps.append(
                     Swap(
@@ -188,7 +177,7 @@ class SyntheticDataSource(BaseDataSource):
                         tx_hash=tx,
                     )
                 )
-                user.total_swaps += 1
+                user.total_swaps      += 1
                 user.daily_swaps_today += 1
 
         return swaps

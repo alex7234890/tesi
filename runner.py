@@ -7,7 +7,7 @@ Usage examples
 python runner.py --mode 1 --coverage all
 
 # Mode 1 — single coverage level
-python runner.py --mode 1 --coverage high --fraud-rate 0.05
+python runner.py --mode 1 --coverage high
 
 # Mode 2 — full synthetic
 python runner.py --mode 2
@@ -34,7 +34,6 @@ from utils.logger import get_logger
 
 from core.pool import InsurancePool
 from core.premium import compute_premium
-from core.fraud_detector import FraudDetector
 from core.oracle_network import OracleNetwork
 from core.claim_processor import ClaimProcessor
 
@@ -74,21 +73,17 @@ def run_single(
     # -----------------------------------------------------------------
     # Instantiate components
     # -----------------------------------------------------------------
-    pool           = InsurancePool(config)
-    fraud_detector = FraudDetector(config, rng)
-    oracle_net     = OracleNetwork(config, rng, logger)
+    pool       = InsurancePool(config)
+    oracle_net = OracleNetwork(config, rng, logger)
 
     claim_proc = ClaimProcessor(
         config=config,
-        fraud_detector=fraud_detector,
-        oracle_network=oracle_net,
         pool=pool,
-        rng=rng,
         logger=logger,
         mode=mode,
     )
 
-    collector  = MetricsCollector()
+    collector = MetricsCollector()
 
     # -----------------------------------------------------------------
     # Datasource
@@ -104,10 +99,6 @@ def run_single(
     # -----------------------------------------------------------------
     # Rolling state across days
     # -----------------------------------------------------------------
-    prev_tint:  float = 0.0   # ETH fraud intercepted yesterday
-    prev_vbase: int   = 1     # insured swaps yesterday
-    blacklisted: set  = set()
-
     # User states (for mode 2 we get them from the datasource)
     users = getattr(ds, "users", {})
 
@@ -124,34 +115,25 @@ def run_single(
     # Main simulation loop
     # -----------------------------------------------------------------
     for day in range(duration):
-        patt   = ds.get_patt(day)
-        swaps  = ds.get_daily_swaps(day)
+        patt  = ds.get_patt(day)
+        swaps = ds.get_daily_swaps(day)
 
         # Users for mode 2 are updated inside the datasource per call
         if mode == 2:
             users = ds.users  # type: ignore[attr-defined]
 
-        madj    = pool.get_madj()
         m_total = pool.get_m_total()
-        e       = config["fraud_detection"]["false_negative_rate"]
         l_pct   = config["market"]["loss_pct_mean"]
 
-        today_tint:   float = 0.0
-        today_claims        = []
-        today_swap_details  = []
+        today_claims       = []
+        today_swap_details = []
 
         for swap in swaps:
-            if swap.user_id in blacklisted:
-                continue
-
             # ---- Premium for this insured swap ----
             premium = compute_premium(
                 value_eth=swap.value_eth,
                 patt=patt,
                 loss_pct=l_pct,
-                tint=prev_tint,
-                e=e,
-                vbase=prev_vbase,
                 m_total=m_total,
                 coverage=swap.coverage,
             )
@@ -160,118 +142,55 @@ def run_single(
 
             # Start building swap detail record
             swap_detail: dict = {
-                "swap_id":        swap.tx_hash,
-                "value_ETH":      swap.value_eth,
-                "was_attacked":   swap.is_attacked,
-                "insured":        True,
-                "coverage_level": swap.coverage,
-                "premium_paid":   premium,
+                "swap_id":         swap.tx_hash,
+                "value_ETH":       swap.value_eth,
+                "was_attacked":    swap.is_attacked,
+                "insured":         True,
+                "coverage_level":  swap.coverage,
+                "premium_paid":    premium,
                 "claim_submitted": False,
                 "claim_approved":  False,
-                "payout_ETH":     0.0,
-                "fraud_score":    None,
-                "rejection_reason": "",
+                "payout_ETH":      0.0,
             }
 
             # ---- Claim if attacked ----
             if swap.is_attacked:
-                # Get user state
                 user = users.get(swap.user_id) if users else None
-                claim_rate    = user.claim_rate if user else 0.0
-                is_fraudulent = user.is_fraudulent if user else False
 
                 pool.register_pending_claim(swap.loss_eth)
-                claim = claim_proc.process(
-                    swap=swap,
-                    claim_rate=claim_rate,
-                    is_fraudulent=is_fraudulent,
-                    day=day,
-                )
+                claim = claim_proc.process(swap=swap)
                 pool.resolve_pending_claim(swap.loss_eth)
                 today_claims.append(claim)
 
-                swap_detail["claim_submitted"]   = True
-                swap_detail["claim_approved"]    = claim.decision == "approved"
-                swap_detail["payout_ETH"]        = claim.payout_eth
-                swap_detail["fraud_score"]        = claim.final_score
-                swap_detail["rejection_reason"]  = claim.rejection_reason or ""
+                swap_detail["claim_submitted"] = True
+                swap_detail["claim_approved"]  = True
+                swap_detail["payout_ETH"]      = claim.payout_eth
 
-                if claim.decision == "approved":
-                    pool.add_payout(claim.payout_eth)
-                    if user:
-                        user.total_claims += 1
-                    logger.debug(
-                        f"APPROVED  payout={claim.payout_eth:.4f} ETH  "
-                        f"user={swap.user_id}  score={claim.final_score}"
-                    )
-                elif claim.decision == "rejected":
-                    blacklisted.add(swap.user_id)
-                    if user:
-                        user.is_blacklisted = True
-                    today_tint += swap.loss_eth  # saved from fraud
-
-                # Track fraud score history
+                pool.add_payout(claim.payout_eth)
                 if user:
-                    user.fraud_score_history.append(claim.final_score)
-                    user.avg_fraud_score = float(
-                        sum(user.fraud_score_history) / len(user.fraud_score_history)
-                    )
+                    user.total_claims += 1
+
+                logger.debug(
+                    f"APPROVED  payout={claim.payout_eth:.4f} ETH  user={swap.user_id}"
+                )
 
             today_swap_details.append(swap_detail)
 
-        # ---- Oracle daily rewards ----
-        oracle_rewards = oracle_net.distribute_daily_rewards(day)
+        # ---- Oracle daily cost ----
+        oracle_rewards = oracle_net.compute_daily_cost(len(today_claims))
         pool.add_oracle_reward(oracle_rewards)
 
         # ---- End-of-day accounting ----
         pool.end_of_day()
 
-        # Log significant events
-        sr = pool.solvency_ratio()
-        if sr < 1.3:
-            logger.warning(f"Day {day}: Pool stress — SR={sr:.3f}")
-        if sr < 1.0:
-            logger.error(f"Day {day}: POOL INSOLVENT — SR={sr:.3f}")
-
         # ---- Breakdown detection ----
-        if not already_broken:
-            _bal   = pool.balance_eth
-            _pend  = pool.pending_liabilities_eth
-            _prem  = pool.total_premiums_eth
-            _pays  = pool.total_payouts_eth
-            if sr < 1.0:
-                breakdown_event = {
-                    "day": day,
-                    "reason": "SR < 1.0 — pool insolvente",
-                    "sr": sr,
-                    "pool_balance": _bal,
-                    "pending_liabilities": _pend,
-                }
-                already_broken = True
-            elif _bal <= 0:
-                breakdown_event = {
-                    "day": day,
-                    "reason": "Saldo pool esaurito",
-                    "sr": 0.0,
-                    "pool_balance": _bal,
-                    "pending_liabilities": _pend,
-                }
-                already_broken = True
-            elif _prem > 0 and _pays > _prem * 1.5:
-                breakdown_event = {
-                    "day": day,
-                    "reason": (
-                        f"Payout totali ({_pays:.2f} ETH) superano "
-                        f"1.5× i premi ({_prem:.2f} ETH)"
-                    ),
-                    "sr": sr,
-                    "pool_balance": _bal,
-                    "pending_liabilities": _pend,
-                }
-                already_broken = True
-
-        prev_tint  = today_tint
-        prev_vbase = max(len(swaps), 1)
+        if not already_broken and pool.balance_eth < 0:
+            breakdown_event = {
+                "day":         day,
+                "reason":      "Saldo pool esaurito (balance < 0 ETH)",
+                "pool_balance": pool.balance_eth,
+            }
+            already_broken = True
 
         # ---- Compute daily flow deltas ----
         premiums_today       = pool.total_premiums_eth       - prev_total_premiums
@@ -291,7 +210,6 @@ def run_single(
             patt=patt,
             mode=mode,
             users=users if mode == 2 else None,
-            n_upgrades=0,
             premiums_today=premiums_today,
             payouts_today=payouts_today,
             oracle_rewards_today=oracle_rewards_today,
@@ -332,10 +250,6 @@ def parse_args() -> argparse.Namespace:
                    help="Coverage level for mode 1 (default: high)")
     p.add_argument("--config", default=None,
                    help="Path to mode-specific YAML config override")
-    p.add_argument("--fraud-rate", type=float, default=None,
-                   help="Override fraud_detection.user_fraud_rate")
-    p.add_argument("--oracle-dishonest-rate", type=float, default=None,
-                   help="Override fraud_detection.oracle_dishonest_rate")
     p.add_argument("--download-fresh", action="store_true",
                    help="Download blockchain data before running (mode 1)")
     p.add_argument("--no-dashboard", action="store_true",
@@ -357,13 +271,6 @@ def main() -> None:
         config_path = os.path.join(_HERE, "config", "mode2_synthetic.yaml")
 
     config = load_config(config_path)
-
-    # Apply CLI overrides
-    if args.fraud_rate is not None:
-        config["fraud_detection"]["user_fraud_rate"] = args.fraud_rate
-        config["users"]["fraud_rate"]                = args.fraud_rate
-    if args.oracle_dishonest_rate is not None:
-        config["fraud_detection"]["oracle_dishonest_rate"] = args.oracle_dishonest_rate
 
     db_path = args.db_path
 

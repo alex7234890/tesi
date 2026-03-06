@@ -1,6 +1,7 @@
 """
 Insurance pool — tracks balance, premiums, payouts and oracle rewards.
 Computes the Solvency Ratio and dynamic margin Madj.
+Pool breakdown = balance_eth < 0 (SR is used only for Madj).
 """
 from __future__ import annotations
 
@@ -27,7 +28,6 @@ class InsurancePool:
 
         self._today_payout: float  = 0.0
         self._today_policies: int  = 0
-        self._ever_insolvent: bool = False
 
     # ------------------------------------------------------------------
     def add_premium(self, amount: float) -> None:
@@ -35,13 +35,11 @@ class InsurancePool:
         self.total_premiums_eth += amount
 
     def add_payout(self, amount: float) -> None:
-        amount = min(amount, max(self.balance_eth, 0.0))
         self.balance_eth -= amount
         self.total_payouts_eth += amount
         self._today_payout += amount
 
     def add_oracle_reward(self, amount: float) -> None:
-        amount = min(amount, max(self.balance_eth, 0.0))
         self.balance_eth -= amount
         self.total_oracle_rewards_eth += amount
 
@@ -62,8 +60,6 @@ class InsurancePool:
         self._daily_policies.append(self._today_policies)
         self._today_payout   = 0.0
         self._today_policies = 0
-        if self.solvency_ratio() < 1.0:
-            self._ever_insolvent = True
 
     # ------------------------------------------------------------------
     def _expected_claims_7d(self) -> float:
@@ -111,4 +107,4 @@ class InsurancePool:
 
     @property
     def survived(self) -> bool:
-        return not self._ever_insolvent
+        return self.balance_eth >= 0
