@@ -21,7 +21,7 @@ from .oracle_network import OracleNetwork
 from .pool import InsurancePool
 from datasources.base import Swap
 
-# Payout multipliers per coverage level (mode 2 default)
+# Payout multipliers per coverage level
 _COVERAGE_PAYOUT = {"low": 0.50, "medium": 0.70, "high": 1.00}
 
 
@@ -74,7 +74,7 @@ class ClaimProcessor:
     ) -> Claim:
         # Step 1: compute raw fraud score (FraudDetector)
         raw_score = self.fraud_detector.compute_fraud_score(
-            tier=swap.user_tier,
+            tier=None,
             claim_rate=claim_rate,
             is_fraudulent=is_fraudulent,
         )
@@ -90,24 +90,17 @@ class ClaimProcessor:
             int(np.median(oracle_scores)) if oracle_scores else raw_score
         )
 
-        # Step 4: initial decision + assign pending rejection reason
+        # Step 4: initial decision
         _fd_cfg = self.fraud_detector._dec
         rejection_reason: Optional[str] = None
-        if final_score > _fd_cfg["auto_reject"]:       # > 80
+        if final_score > _fd_cfg["auto_reject"]:
             _pending_reason = "fraud_score_gt_80"
-        elif final_score >= _fd_cfg["captcha_low"]:    # >= 60
+        elif final_score >= _fd_cfg["captcha_low"]:
             _pending_reason = "captcha_failed"
         else:
-            # score < 60: bronze/silver get captcha due to tier pattern
-            if (
-                swap.user_tier is not None
-                and swap.user_tier not in ("gold", "platinum")
-            ):
-                _pending_reason = "pattern_invalid"
-            else:
-                _pending_reason = ""
+            _pending_reason = ""
 
-        decision = self.fraud_detector.get_decision(final_score, swap.user_tier)
+        decision = self.fraud_detector.get_decision(final_score, None)
 
         # Step 5: captcha simulation
         if decision == "captcha":
@@ -125,10 +118,6 @@ class ClaimProcessor:
         if decision == "approved":
             multiplier = _COVERAGE_PAYOUT.get(swap.coverage.lower(), 1.00)
             payout = swap.loss_eth * multiplier
-            # Apply tier cap in mode 2
-            if self.mode == 2 and swap.user_tier is not None:
-                cap = self._get_tier_cap(swap.user_tier)
-                payout = min(payout, cap)
         else:
             payout = 0.0
 
@@ -141,7 +130,7 @@ class ClaimProcessor:
         return Claim(
             swap_tx_hash=swap.tx_hash,
             user_id=swap.user_id,
-            user_tier=swap.user_tier,
+            user_tier=None,
             coverage=swap.coverage,
             loss_eth=swap.loss_eth,
             fraud_score=raw_score,
@@ -151,9 +140,3 @@ class ClaimProcessor:
             payout_eth=payout,
             rejection_reason=rejection_reason,
         )
-
-    # ------------------------------------------------------------------
-    def _get_tier_cap(self, tier: str) -> float:
-        tiers = self.config.get("tiers", {})
-        tier_data = tiers.get(tier.lower(), {})
-        return float(tier_data.get("max_capital_eth", float("inf")))

@@ -37,7 +37,6 @@ from core.premium import compute_premium
 from core.fraud_detector import FraudDetector
 from core.oracle_network import OracleNetwork
 from core.claim_processor import ClaimProcessor
-from core.tier_manager import TierManager
 
 from datasources.blockchain import BlockchainDataSource
 from datasources.synthetic import SyntheticDataSource
@@ -89,7 +88,6 @@ def run_single(
         mode=mode,
     )
 
-    tier_mgr   = TierManager(config, logger) if mode == 2 else None
     collector  = MetricsCollector()
 
     # -----------------------------------------------------------------
@@ -225,13 +223,6 @@ def run_single(
         oracle_rewards = oracle_net.distribute_daily_rewards(day)
         pool.add_oracle_reward(oracle_rewards)
 
-        # ---- Tier upgrades (mode 2) ----
-        n_upgrades = 0
-        if mode == 2 and tier_mgr is not None:
-            n_upgrades = tier_mgr.process_upgrades(users, day)
-            if n_upgrades > 0:
-                logger.info(f"Day {day}: {n_upgrades} tier upgrade(s)")
-
         # ---- End-of-day accounting ----
         pool.end_of_day()
 
@@ -300,7 +291,7 @@ def run_single(
             patt=patt,
             mode=mode,
             users=users if mode == 2 else None,
-            n_upgrades=n_upgrades,
+            n_upgrades=0,
             premiums_today=premiums_today,
             payouts_today=payouts_today,
             oracle_rewards_today=oracle_rewards_today,

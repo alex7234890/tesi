@@ -24,6 +24,7 @@ users:
   fraud_rate: 0.05
   fraud_strategy: "mixed"
   swap_frequency_mean: 3
+  max_daily_swaps: 10
   coverage_distribution:
     low: 0.33
     medium: 0.34
@@ -39,32 +40,6 @@ pool:
     high_risk: 0.10
     medium_risk: 0.05
     healthy: 0.00
-
-tiers:
-  bronze:
-    max_capital_eth: 1.0
-    max_daily_swaps: 3
-    fraud_score_base: 50
-  silver:
-    max_capital_eth: 5.0
-    max_daily_swaps: 3
-    fraud_score_base: 30
-  gold:
-    max_capital_eth: 20.0
-    max_daily_swaps: 4
-    fraud_score_base: 15
-  platinum:
-    stake_pct: 0.20
-    fraud_score_base: 0
-  upgrades:
-    bronze_to_silver:
-      min_swaps: 18
-      min_days: 30
-      max_avg_fraud_score: 52
-    silver_to_gold:
-      min_swaps: 55
-      min_days: 60
-      max_avg_fraud_score: 35
 
 fraud_detection:
   user_fraud_rate: 0.05
