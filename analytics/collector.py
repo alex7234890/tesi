@@ -128,23 +128,15 @@ class MetricsCollector:
         # User metrics (mode 2 only)
         if mode == 2 and users is not None:
             active = {uid: u for uid, u in users.items() if not u.is_blacklisted}
-            row["n_users_bronze"]       = sum(1 for u in active.values() if u.tier == "bronze")
-            row["n_users_silver"]       = sum(1 for u in active.values() if u.tier == "silver")
-            row["n_users_gold"]         = sum(1 for u in active.values() if u.tier == "gold")
-            row["n_users_platinum"]     = sum(1 for u in active.values() if u.tier == "platinum")
+            row["n_users_active"]       = len(active)
             row["n_users_blacklisted"]  = sum(1 for u in users.values() if u.is_blacklisted)
-            row["n_upgrades_this_tick"] = n_upgrades
             claim_rates = [u.claim_rate for u in active.values()]
             row["avg_claim_rate"] = (
                 sum(claim_rates) / len(claim_rates) if claim_rates else 0.0
             )
         else:
-            row["n_users_bronze"]       = 0
-            row["n_users_silver"]       = 0
-            row["n_users_gold"]         = 0
-            row["n_users_platinum"]     = 0
+            row["n_users_active"]       = 0
             row["n_users_blacklisted"]  = 0
-            row["n_upgrades_this_tick"] = 0
             row["avg_claim_rate"]       = 0.0
 
         self.records.append(row)

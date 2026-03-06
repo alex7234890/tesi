@@ -6,8 +6,10 @@ Avvio:
 """
 from __future__ import annotations
 
+import copy
 import datetime
 import os
+import random
 import sqlite3
 import sys
 import glob as _glob
@@ -234,31 +236,17 @@ with st.sidebar.expander("⚔️ Parametri Slashing"):
 
 # ---- Parametri FraudScore ----
 with st.sidebar.expander("🔍 Parametri FraudScore"):
-    fs_bronze   = st.number_input("Score base tier Bronze",   min_value=0, max_value=130, value=50, step=1, key="fs_bronze")
-    fs_silver   = st.number_input("Score base tier Silver",   min_value=0, max_value=130, value=30, step=1, key="fs_silver")
-    fs_gold     = st.number_input("Score base tier Gold",     min_value=0, max_value=130, value=15, step=1, key="fs_gold")
-    fs_platinum = st.number_input("Score base tier Platinum", min_value=0, max_value=130, value=0,  step=1, key="fs_platinum")
     fs_auto_approve = st.number_input(
-        "Soglia approvazione automatica (< X → approvato)", min_value=0, max_value=130, value=60, step=1,
+        "Soglia approvazione automatica (< X → approvato)", min_value=0, max_value=80, value=60, step=1,
         key="fs_auto_approve",
     )
     fs_captcha = st.number_input(
-        "Soglia CAPTCHA (≥ X → CAPTCHA; > Y → rigettato)", min_value=0, max_value=130, value=80, step=1,
+        "Soglia rigetto (> X → rigettato; tra soglie → CAPTCHA)", min_value=0, max_value=80, value=80, step=1,
         key="fs_captcha",
     )
     cr_very_susp = st.slider("Claim rate — soglia molto sospetta (%)", 0, 100, 30, step=1, key="fs_cr_high")
     cr_susp_high = st.slider("Claim rate — soglia alta (%)",           0, 100, 20, step=1, key="fs_cr_med")
     cr_susp_med  = st.slider("Claim rate — soglia media (%)",          0, 100, 10, step=1, key="fs_cr_low")
-
-# ---- Parametri Upgrade Tier ----
-with st.sidebar.expander("📈 Parametri Upgrade Tier"):
-    b2s_swaps  = st.number_input("Bronze→Silver: min swap",             min_value=1,  value=18,  step=1, key="tu_b2s_swaps")
-    b2s_days   = st.number_input("Bronze→Silver: min giorni attivi",    min_value=1,  value=30,  step=1, key="tu_b2s_days")
-    b2s_maxfs  = st.number_input("Bronze→Silver: max FraudScore medio", min_value=0,  max_value=130, value=52, step=1, key="tu_b2s_maxfs")
-    s2g_swaps  = st.number_input("Silver→Gold: min swap",               min_value=1,  value=55,  step=1, key="tu_s2g_swaps")
-    s2g_days   = st.number_input("Silver→Gold: min giorni attivi",      min_value=1,  value=60,  step=1, key="tu_s2g_days")
-    s2g_maxfs  = st.number_input("Silver→Gold: max FraudScore medio",   min_value=0,  max_value=130, value=35, step=1, key="tu_s2g_maxfs")
-    pt_stake   = st.slider("Stake Platinum (% del limite swap scelto)", 5, 50, 20, step=1, key="tu_pt_stake")
 
 st.sidebar.markdown("---")
 # Chiave Infura letta da session_state (gestita nella tab Dati Infura)
@@ -272,26 +260,28 @@ with st.sidebar.expander("🔬 Parametri Mode 2 — Sintetica"):
         "Percorso file Patt", value="data/patt_historical.csv",
         key="m2_patt_file", disabled=is_mode1,
     )
+    seed_manual = st.toggle(
+        "Seed fisso (riproducibile)",
+        value=False, key="m2_seed_manual", disabled=is_mode1,
+        help="Se attivo, usa sempre lo stesso seed. Se disattivo, ogni simulazione usa un seed diverso.",
+    )
     rng_seed = st.number_input(
-        "Seed casuale", min_value=0, max_value=99999, value=42, step=1,
-        key="m2_seed", disabled=is_mode1,
+        "Seed (usato solo se 'Seed fisso' è attivo)", min_value=0, max_value=99999, value=42, step=1,
+        key="m2_seed", disabled=(is_mode1 or not seed_manual),
     )
     n_synthetic_users = st.number_input(
         "N utenti sintetici (iniziali)", min_value=5, max_value=500, value=50, step=5,
         key="m2_n_users", disabled=is_mode1,
     )
+    max_daily_swaps = st.number_input(
+        "Max swap/giorno per utente", min_value=1, max_value=100, value=10, step=1,
+        key="m2_max_daily_swaps", disabled=is_mode1,
+        help="Limite globale di swap che ogni singolo utente può fare in un giorno.",
+    )
     fraud_rate = st.slider(
         "Tasso frode utenti", 0.0, 0.30, 0.05, step=0.01,
         key="m2_fraud_rate", disabled=is_mode1,
     )
-    st.markdown("**Distribuzione tier iniziale**")
-    tier_bronze_pct   = st.slider("Bronze %",   0, 100, 70, step=5,  key="m2_tier_bronze",   disabled=is_mode1)
-    tier_silver_pct   = st.slider("Silver %",   0, 100, 20, step=5,  key="m2_tier_silver",   disabled=is_mode1)
-    tier_gold_pct     = st.slider("Gold %",     0, 100,  8, step=1,  key="m2_tier_gold",     disabled=is_mode1)
-    tier_platinum_pct = st.slider("Platinum %", 0, 100,  2, step=1,  key="m2_tier_platinum", disabled=is_mode1)
-    tier_total = tier_bronze_pct + tier_silver_pct + tier_gold_pct + tier_platinum_pct
-    if is_mode2 and tier_total != 100:
-        st.warning(f"⚠️ I tier sommano a {tier_total}% — devono sommare esattamente a 100%.")
 
 st.sidebar.markdown("---")
 run_btn    = st.sidebar.button("▶ Avvia Simulazione", type="primary", key="run_btn")
@@ -307,18 +297,13 @@ def _build_config(
     mbase: float, loss_pct: float, false_negative_rate: float,
     sr_threshold_high: float, sr_threshold_med: float,
     oracle_reward_claim: float, captcha_reward: float, initial_pool_balance: float,
-    rng_seed: int, n_synthetic_users: int,
-    tier_bronze_pct: float, tier_silver_pct: float,
-    tier_gold_pct: float, tier_platinum_pct: float, fraud_rate: float,
-    omit_oracle_fraud: bool,
+    rng_seed: int, seed_manual: bool, n_synthetic_users: int, max_daily_swaps: int,
+    fraud_rate: float, omit_oracle_fraud: bool,
     n_oracles: int, n_oracles_per_claim: int, divergence_threshold: int,
     entry_divergences: int, watchlist_months: int, oracle_stake_min: float,
     slash_deposit: float, slash_pool_pct: int, slash_reporter_pct: int, slash_jury_pct: int,
-    fs_bronze: int, fs_silver: int, fs_gold: int, fs_platinum: int,
     fs_auto_approve: int, fs_captcha: int,
     cr_very_susp: int, cr_susp_high: int, cr_susp_med: int,
-    b2s_swaps: int, b2s_days: int, b2s_maxfs: int,
-    s2g_swaps: int, s2g_days: int, s2g_maxfs: int, pt_stake: int,
 ) -> dict:
     cfg_path = os.path.join(
         _ROOT, "config",
@@ -326,8 +311,15 @@ def _build_config(
     )
     cfg = load_config(cfg_path)
 
+    # Seed: if manual use fixed value, else generate random
+    if seed_manual:
+        run_seed = int(rng_seed)
+    else:
+        run_seed = random.randint(0, 99999)
+        st.sidebar.info(f"Seed usato: {run_seed}")
+
     cfg["simulation"]["duration_days"] = int(duration_days)
-    cfg["simulation"]["seed"]          = int(rng_seed)
+    cfg["simulation"]["seed"]          = run_seed
 
     cfg["pool"]["mbase"]                              = float(mbase)
     cfg["pool"]["initial_balance_eth"]                = float(initial_pool_balance)
@@ -360,31 +352,11 @@ def _build_config(
     cfg["oracles"]["slashing"]["distribution"]["reporter"]     = slash_reporter_pct / 100.0
     cfg["oracles"]["slashing"]["distribution"]["jury"]         = slash_jury_pct     / 100.0
 
-    cfg["tiers"]["bronze"]["fraud_score_base"]   = int(fs_bronze)
-    cfg["tiers"]["silver"]["fraud_score_base"]   = int(fs_silver)
-    cfg["tiers"]["gold"]["fraud_score_base"]     = int(fs_gold)
-    cfg["tiers"]["platinum"]["fraud_score_base"] = int(fs_platinum)
-    cfg["tiers"]["platinum"]["stake_pct"]        = pt_stake / 100.0
-    cfg["tiers"]["upgrades"]["bronze_to_silver"]["min_swaps"]           = int(b2s_swaps)
-    cfg["tiers"]["upgrades"]["bronze_to_silver"]["min_days"]            = int(b2s_days)
-    cfg["tiers"]["upgrades"]["bronze_to_silver"]["max_avg_fraud_score"] = int(b2s_maxfs)
-    cfg["tiers"]["upgrades"]["silver_to_gold"]["min_swaps"]             = int(s2g_swaps)
-    cfg["tiers"]["upgrades"]["silver_to_gold"]["min_days"]              = int(s2g_days)
-    cfg["tiers"]["upgrades"]["silver_to_gold"]["max_avg_fraud_score"]   = int(s2g_maxfs)
-
     if mode == 2:
         cfg["users"]["initial_count"]       = int(n_synthetic_users)
         cfg["users"]["fraud_rate"]          = float(fraud_rate)
         cfg["users"]["swap_frequency_mean"] = max(1, int(swaps_per_day / max(n_synthetic_users, 1)))
-        cfg["users"]["initial_tier_distribution"] = {
-            "bronze":   float(tier_bronze_pct)   / 100.0,
-            "silver":   float(tier_silver_pct)   / 100.0,
-            "gold":     float(tier_gold_pct)     / 100.0,
-            "platinum": float(tier_platinum_pct) / 100.0,
-        }
-
-    # La chiave Infura è già nel config caricato da base.yaml
-    # (gestita e salvata dalla tab Dati Infura)
+        cfg["users"]["max_daily_swaps"]     = int(max_daily_swaps)
 
     # Per Mode 1: usa patt_value calcolato dall'ultimo download Infura
     if mode == 1:
@@ -411,15 +383,12 @@ def _all_params() -> dict:
         oracle_stake_min=oracle_stake_min,
         slash_deposit=slash_deposit, slash_pool_pct=slash_pool_pct,
         slash_reporter_pct=slash_reporter_pct, slash_jury_pct=slash_jury_pct,
-        fs_bronze=fs_bronze, fs_silver=fs_silver, fs_gold=fs_gold, fs_platinum=fs_platinum,
         fs_auto_approve=fs_auto_approve, fs_captcha=fs_captcha,
         cr_very_susp=cr_very_susp, cr_susp_high=cr_susp_high, cr_susp_med=cr_susp_med,
-        b2s_swaps=b2s_swaps, b2s_days=b2s_days, b2s_maxfs=b2s_maxfs,
-        s2g_swaps=s2g_swaps, s2g_days=s2g_days, s2g_maxfs=s2g_maxfs, pt_stake=pt_stake,
         patt_file_path=patt_file_path,
-        rng_seed=rng_seed, n_synthetic_users=n_synthetic_users, fraud_rate=fraud_rate,
-        tier_bronze_pct=tier_bronze_pct, tier_silver_pct=tier_silver_pct,
-        tier_gold_pct=tier_gold_pct, tier_platinum_pct=tier_platinum_pct,
+        seed_manual=seed_manual, rng_seed=rng_seed,
+        n_synthetic_users=n_synthetic_users, max_daily_swaps=max_daily_swaps,
+        fraud_rate=fraud_rate,
     )
 
 
@@ -445,13 +414,6 @@ def render_riepilogo(p: dict) -> str:
     margin_pct = M_total / (1.0 + M_total) * 100.0 if M_total >= 0 else 0.0
 
     mode_str  = "Mode 1 — Dati Reali" if p["mode"] == 1 else "Mode 2 — Sintetica"
-    tier_str  = (
-        "disabilitato (Mode 1)" if p["mode"] == 1
-        else (
-            f"attivo — Bronze {p['tier_bronze_pct']}% / Silver {p['tier_silver_pct']}% / "
-            f"Gold {p['tier_gold_pct']}% / Platinum {p['tier_platinum_pct']}%"
-        )
-    )
     oracle_str = "disabilitate (modalità semplificata)" if p["omit_oracle_fraud"] else "attive"
 
     if p["mode"] == 1:
@@ -518,7 +480,6 @@ def render_riepilogo(p: dict) -> str:
         f"- ~**{total_swaps_est}** swap totali | "
         f"~**{exp_attacks_est}** attacchi sandwich | "
         f"~**{exp_fraud_est}** claim fraudolenti attesi\n"
-        f"- Tier system: {tier_str}\n"
         f"- Frodi oracle: {oracle_str}\n"
         f"- Oracle in rete: **{p['n_oracles']}** | sorteggiati per claim: **{p['n_oracles_per_claim']}**\n"
         f"- Distribuzione slashing: pool {p['slash_pool_pct']}% / "
@@ -530,16 +491,51 @@ def render_riepilogo(p: dict) -> str:
 # Avvio simulazione
 # =========================================================================
 
+def _make_cfg(**kwargs) -> dict:
+    """Helper to call _build_config with all current sidebar params as defaults."""
+    return _build_config(
+        mode=kwargs.get("mode", mode),
+        duration_days=kwargs.get("duration_days", duration_days),
+        swaps_per_day=kwargs.get("swaps_per_day", swaps_per_day),
+        coverage=kwargs.get("coverage", coverage),
+        mbase=kwargs.get("mbase", mbase),
+        loss_pct=kwargs.get("loss_pct", loss_pct),
+        false_negative_rate=kwargs.get("false_negative_rate", false_negative_rate),
+        sr_threshold_high=kwargs.get("sr_threshold_high", sr_threshold_high),
+        sr_threshold_med=kwargs.get("sr_threshold_med", sr_threshold_med),
+        oracle_reward_claim=kwargs.get("oracle_reward_claim", oracle_reward_claim),
+        captcha_reward=kwargs.get("captcha_reward", captcha_reward),
+        initial_pool_balance=kwargs.get("initial_pool_balance", initial_pool_balance),
+        rng_seed=kwargs.get("rng_seed", rng_seed),
+        seed_manual=kwargs.get("seed_manual", seed_manual),
+        n_synthetic_users=kwargs.get("n_synthetic_users", n_synthetic_users),
+        max_daily_swaps=kwargs.get("max_daily_swaps", max_daily_swaps),
+        fraud_rate=kwargs.get("fraud_rate", fraud_rate),
+        omit_oracle_fraud=kwargs.get("omit_oracle_fraud", omit_oracle_fraud),
+        n_oracles=kwargs.get("n_oracles", n_oracles),
+        n_oracles_per_claim=kwargs.get("n_oracles_per_claim", n_oracles_per_claim),
+        divergence_threshold=kwargs.get("divergence_threshold", divergence_threshold),
+        entry_divergences=kwargs.get("entry_divergences", entry_divergences),
+        watchlist_months=kwargs.get("watchlist_months", watchlist_months),
+        oracle_stake_min=kwargs.get("oracle_stake_min", oracle_stake_min),
+        slash_deposit=kwargs.get("slash_deposit", slash_deposit),
+        slash_pool_pct=kwargs.get("slash_pool_pct", slash_pool_pct),
+        slash_reporter_pct=kwargs.get("slash_reporter_pct", slash_reporter_pct),
+        slash_jury_pct=kwargs.get("slash_jury_pct", slash_jury_pct),
+        fs_auto_approve=kwargs.get("fs_auto_approve", fs_auto_approve),
+        fs_captcha=kwargs.get("fs_captcha", fs_captcha),
+        cr_very_susp=kwargs.get("cr_very_susp", cr_very_susp),
+        cr_susp_high=kwargs.get("cr_susp_high", cr_susp_high),
+        cr_susp_med=kwargs.get("cr_susp_med", cr_susp_med),
+    )
+
+
 if run_btn:
     errors = []
     if slash_total != 100:
         errors.append(
             f"Le percentuali di slashing sommano a {slash_total}% invece di 100%."
         )
-    if is_mode2:
-        t_sum = tier_bronze_pct + tier_silver_pct + tier_gold_pct + tier_platinum_pct
-        if t_sum != 100:
-            errors.append(f"La distribuzione tier somma a {t_sum}% invece di 100%.")
     if is_mode1 and _db_swap_count() == 0:
         errors.append(
             "Il database Infura è vuoto. Vai alla tab **🔗 Dati Infura**, "
@@ -551,27 +547,7 @@ if run_btn:
             st.error(f"⚠️ {e} Correggi i parametri prima di avviare.")
     else:
         p = _all_params()
-        cfg = _build_config(
-            mode=mode, duration_days=duration_days, swaps_per_day=swaps_per_day,
-            coverage=coverage, mbase=mbase, loss_pct=loss_pct,
-            false_negative_rate=false_negative_rate, sr_threshold_high=sr_threshold_high,
-            sr_threshold_med=sr_threshold_med, oracle_reward_claim=oracle_reward_claim,
-            captcha_reward=captcha_reward, initial_pool_balance=initial_pool_balance,
-            rng_seed=rng_seed, n_synthetic_users=n_synthetic_users,
-            tier_bronze_pct=tier_bronze_pct, tier_silver_pct=tier_silver_pct,
-            tier_gold_pct=tier_gold_pct, tier_platinum_pct=tier_platinum_pct,
-            fraud_rate=fraud_rate, omit_oracle_fraud=omit_oracle_fraud,
-            n_oracles=n_oracles, n_oracles_per_claim=n_oracles_per_claim,
-            divergence_threshold=divergence_threshold, entry_divergences=entry_divergences,
-            watchlist_months=watchlist_months, oracle_stake_min=oracle_stake_min,
-            slash_deposit=slash_deposit, slash_pool_pct=slash_pool_pct,
-            slash_reporter_pct=slash_reporter_pct, slash_jury_pct=slash_jury_pct,
-            fs_bronze=fs_bronze, fs_silver=fs_silver, fs_gold=fs_gold, fs_platinum=fs_platinum,
-            fs_auto_approve=fs_auto_approve, fs_captcha=fs_captcha,
-            cr_very_susp=cr_very_susp, cr_susp_high=cr_susp_high, cr_susp_med=cr_susp_med,
-            b2s_swaps=b2s_swaps, b2s_days=b2s_days, b2s_maxfs=b2s_maxfs,
-            s2g_swaps=s2g_swaps, s2g_days=s2g_days, s2g_maxfs=s2g_maxfs, pt_stake=pt_stake,
-        )
+        cfg = _make_cfg()
         with st.spinner("Simulazione in corso…"):
             collector, pool, summary = run_single(
                 cfg, mode=mode, coverage=coverage, db_path=_DB_PATH,
@@ -775,13 +751,17 @@ with tab_sim:
         if last_mode == 2:
             st.markdown("---")
             st.subheader("4 — Distribuzione Utenti")
-            st.caption("Fonte: conteggio utenti attivi per tier tracciato dal TierManager (solo Mode 2)")
+            st.caption("Fonte: conteggio utenti attivi e blacklistati (solo Mode 2)")
 
-            ud_df = first_df[[
-                "day", "n_users_bronze", "n_users_silver",
-                "n_users_gold", "n_users_platinum", "n_users_blacklisted",
-            ]].copy()
-            ud_df.columns = ["Giorno", "Bronze", "Silver", "Gold", "Platinum", "Blacklistati"]
+            _ud_cols = ["day"]
+            if "n_users_active" in first_df.columns:
+                _ud_cols.append("n_users_active")
+            if "n_users_blacklisted" in first_df.columns:
+                _ud_cols.append("n_users_blacklisted")
+            ud_df = first_df[_ud_cols].copy()
+            _ud_rename = {"day": "Giorno", "n_users_active": "Utenti Attivi",
+                          "n_users_blacklisted": "Blacklistati"}
+            ud_df.columns = [_ud_rename.get(c, c) for c in ud_df.columns]
             st.dataframe(ud_df, use_container_width=True, height=250)
 
         # ---- Pannello 5: Rete Oracle ----
@@ -1054,34 +1034,21 @@ with tab_sim:
                 ("Slashing pool %", _p['slash_pool_pct']),
                 ("Slashing reporter %", _p['slash_reporter_pct']),
                 ("Slashing jury %", _p['slash_jury_pct']),
-                ("FraudScore Bronze", _p['fs_bronze']),
-                ("FraudScore Silver", _p['fs_silver']),
-                ("FraudScore Gold", _p['fs_gold']),
-                ("FraudScore Platinum", _p['fs_platinum']),
-                ("Soglia auto-approvazione", _p['fs_auto_approve']),
-                ("Soglia CAPTCHA", _p['fs_captcha']),
+                ("Soglia auto-approvazione FraudScore", _p['fs_auto_approve']),
+                ("Soglia rigetto FraudScore", _p['fs_captcha']),
                 ("Claim rate molto sospetta %", _p['cr_very_susp']),
                 ("Claim rate alta %", _p['cr_susp_high']),
                 ("Claim rate media %", _p['cr_susp_med']),
-                ("Bronze→Silver min swap", _p['b2s_swaps']),
-                ("Bronze→Silver min giorni", _p['b2s_days']),
-                ("Bronze→Silver max FraudScore", _p['b2s_maxfs']),
-                ("Silver→Gold min swap", _p['s2g_swaps']),
-                ("Silver→Gold min giorni", _p['s2g_days']),
-                ("Silver→Gold max FraudScore", _p['s2g_maxfs']),
-                ("Stake Platinum %", _p['pt_stake']),
                 ("Frodi oracle", "Disabilitate" if _p['omit_oracle_fraud'] else "Attive"),
             ]
             if _p["mode"] == 2:
                 _param_rows += [
                     ("Swap/giorno", _p['swaps_per_day']),
                     ("N utenti sintetici", _p['n_synthetic_users']),
+                    ("Max swap/giorno per utente", _p['max_daily_swaps']),
                     ("Tasso frode utenti", f"{_p['fraud_rate']:.1%}"),
-                    ("Seed RNG", _p['rng_seed']),
-                    ("Tier Bronze %", _p['tier_bronze_pct']),
-                    ("Tier Silver %", _p['tier_silver_pct']),
-                    ("Tier Gold %", _p['tier_gold_pct']),
-                    ("Tier Platinum %", _p['tier_platinum_pct']),
+                    ("Seed fisso", "Sì" if _p['seed_manual'] else "No (casuale)"),
+                    ("Seed RNG", _p['rng_seed'] if _p['seed_manual'] else "auto"),
                 ]
             if _p["mode"] == 1:
                 _patt_v = st.session_state.get("infura_patt_value")
@@ -1429,11 +1396,13 @@ with tab_stress:
     )
 
     _sweep_params = {
-        "Patt (tasso attacco %)":         ("market", "attack_rate",      0.01, 0.30, 0.02, "percent"),
-        "L% (perdita media per attacco)": ("pool",   "loss_pct_mean",    0.05, 0.50, 0.05, "percent"),
-        "Mbase (margine base)":           ("pool",   "mbase",            0.05, 0.50, 0.05, "percent"),
-        "Saldo iniziale pool (ETH)":      ("pool",   "initial_balance_eth", 20, 500, 20, "number"),
-        "Durata simulazione (giorni)":    ("simulation", "duration_days", 10, 90, 10, "int"),
+        "Patt (tasso attacco %)":         ("market",      "attack_rate",         0.01, 0.30, 0.02, "percent"),
+        "L% (perdita media per attacco)": ("market",      "loss_pct_mean",       0.05, 0.50, 0.05, "percent"),
+        "Mbase (margine base)":           ("pool",        "mbase",               0.05, 0.50, 0.05, "percent"),
+        "Saldo iniziale pool (ETH)":      ("pool",        "initial_balance_eth", 20,   500,  20,   "number"),
+        "E (False Negative Rate)":        ("fraud_detection", "false_negative_rate", 0.01, 0.50, 0.05, "percent"),
+        "Fraud rate utenti":              ("fraud_detection", "user_fraud_rate",     0.0,  0.30, 0.03, "percent"),
+        "Durata simulazione (giorni)":    ("simulation",  "duration_days",       10,   90,   10,   "int"),
     }
 
     _sw_col1, _sw_col2 = st.columns(2)
@@ -1459,36 +1428,16 @@ with tab_stress:
         _sweep_values = _np_s.linspace(_sweep_min, _sweep_max, int(_sweep_n_steps))
         _sweep_results = []
         _sw_prog = st.progress(0, text="Avvio sweep…")
+        # Base config (built once with seed_manual=True to get deterministic base)
+        _base_cfg_sw = _make_cfg(mode=_st_mode, seed_manual=True, rng_seed=rng_seed if seed_manual else random.randint(0, 99999))
+        _base_seed_sw = _base_cfg_sw["simulation"]["seed"]
         for _i_sw, _val_sw in enumerate(_sweep_values):
             _sw_prog.progress(int(_i_sw / len(_sweep_values) * 100),
                               text=f"Step {_i_sw+1}/{len(_sweep_values)}: {_sweep_param_label}={_val_sw:.4f}")
             try:
-                _cfg_sw = _build_config(
-                    mode=_st_mode, duration_days=duration_days,
-                    swaps_per_day=swaps_per_day, coverage=coverage,
-                    mbase=mbase, loss_pct=loss_pct,
-                    false_negative_rate=false_negative_rate,
-                    sr_threshold_high=sr_threshold_high, sr_threshold_med=sr_threshold_med,
-                    oracle_reward_claim=oracle_reward_claim, captcha_reward=captcha_reward,
-                    initial_pool_balance=initial_pool_balance, rng_seed=rng_seed,
-                    n_synthetic_users=n_synthetic_users,
-                    tier_bronze_pct=tier_bronze_pct, tier_silver_pct=tier_silver_pct,
-                    tier_gold_pct=tier_gold_pct, tier_platinum_pct=tier_platinum_pct,
-                    fraud_rate=fraud_rate, omit_oracle_fraud=omit_oracle_fraud,
-                    n_oracles=n_oracles, n_oracles_per_claim=n_oracles_per_claim,
-                    divergence_threshold=divergence_threshold,
-                    entry_divergences=entry_divergences, watchlist_months=watchlist_months,
-                    oracle_stake_min=oracle_stake_min, slash_deposit=slash_deposit,
-                    slash_pool_pct=slash_pool_pct, slash_reporter_pct=slash_reporter_pct,
-                    slash_jury_pct=slash_jury_pct,
-                    fs_bronze=fs_bronze, fs_silver=fs_silver, fs_gold=fs_gold,
-                    fs_platinum=fs_platinum, fs_auto_approve=fs_auto_approve,
-                    fs_captcha=fs_captcha, cr_very_susp=cr_very_susp,
-                    cr_susp_high=cr_susp_high, cr_susp_med=cr_susp_med,
-                    b2s_swaps=b2s_swaps, b2s_days=b2s_days, b2s_maxfs=b2s_maxfs,
-                    s2g_swaps=s2g_swaps, s2g_days=s2g_days, s2g_maxfs=s2g_maxfs,
-                    pt_stake=pt_stake,
-                )
+                # Deep copy per ogni step — seed diverso per ogni step
+                _cfg_sw = copy.deepcopy(_base_cfg_sw)
+                _cfg_sw["simulation"]["seed"] = _base_seed_sw + _i_sw
                 # Override parametro variato
                 _cfg_sw.setdefault(_sp_section, {})[_sp_key] = (
                     int(_val_sw) if _sp_type == "int" else float(_val_sw)
@@ -1565,6 +1514,8 @@ with tab_stress:
         _g_prog = st.progress(0, text="Avvio griglia…")
         _g_total = len(_gx_vals) * len(_gy_vals)
         _g_done = 0
+        _base_cfg_g = _make_cfg(mode=_st_mode, seed_manual=True, rng_seed=rng_seed if seed_manual else random.randint(0, 99999))
+        _base_seed_g = _base_cfg_g["simulation"]["seed"]
         for _xv in _gx_vals:
             _row_data = {}
             for _yv in _gy_vals:
@@ -1572,32 +1523,8 @@ with tab_stress:
                 _g_prog.progress(int(_g_done / _g_total * 100),
                                  text=f"Step {_g_done}/{_g_total}")
                 try:
-                    _cfg_g = _build_config(
-                        mode=_st_mode, duration_days=duration_days,
-                        swaps_per_day=swaps_per_day, coverage=coverage,
-                        mbase=mbase, loss_pct=loss_pct,
-                        false_negative_rate=false_negative_rate,
-                        sr_threshold_high=sr_threshold_high, sr_threshold_med=sr_threshold_med,
-                        oracle_reward_claim=oracle_reward_claim, captcha_reward=captcha_reward,
-                        initial_pool_balance=initial_pool_balance, rng_seed=rng_seed,
-                        n_synthetic_users=n_synthetic_users,
-                        tier_bronze_pct=tier_bronze_pct, tier_silver_pct=tier_silver_pct,
-                        tier_gold_pct=tier_gold_pct, tier_platinum_pct=tier_platinum_pct,
-                        fraud_rate=fraud_rate, omit_oracle_fraud=omit_oracle_fraud,
-                        n_oracles=n_oracles, n_oracles_per_claim=n_oracles_per_claim,
-                        divergence_threshold=divergence_threshold,
-                        entry_divergences=entry_divergences, watchlist_months=watchlist_months,
-                        oracle_stake_min=oracle_stake_min, slash_deposit=slash_deposit,
-                        slash_pool_pct=slash_pool_pct, slash_reporter_pct=slash_reporter_pct,
-                        slash_jury_pct=slash_jury_pct,
-                        fs_bronze=fs_bronze, fs_silver=fs_silver, fs_gold=fs_gold,
-                        fs_platinum=fs_platinum, fs_auto_approve=fs_auto_approve,
-                        fs_captcha=fs_captcha, cr_very_susp=cr_very_susp,
-                        cr_susp_high=cr_susp_high, cr_susp_med=cr_susp_med,
-                        b2s_swaps=b2s_swaps, b2s_days=b2s_days, b2s_maxfs=b2s_maxfs,
-                        s2g_swaps=s2g_swaps, s2g_days=s2g_days, s2g_maxfs=s2g_maxfs,
-                        pt_stake=pt_stake,
-                    )
+                    _cfg_g = copy.deepcopy(_base_cfg_g)
+                    _cfg_g["simulation"]["seed"] = _base_seed_g + _g_done
                     _cfg_g.setdefault(_gp_x[0], {})[_gp_x[1]] = float(_xv)
                     _cfg_g.setdefault(_gp_y[0], {})[_gp_y[1]] = float(_yv)
                     _, _, _sum_g = run_single(_cfg_g, mode=_st_mode, coverage=coverage, db_path=_DB_PATH)
@@ -1649,32 +1576,7 @@ with tab_stress:
             st.caption(_pr_data["desc"])
             if st.button(f"▶ Esegui", key=f"preset_run_{_pr_i}"):
                 try:
-                    _cfg_pr = _build_config(
-                        mode=_st_mode, duration_days=duration_days,
-                        swaps_per_day=swaps_per_day, coverage=coverage,
-                        mbase=mbase, loss_pct=loss_pct,
-                        false_negative_rate=false_negative_rate,
-                        sr_threshold_high=sr_threshold_high, sr_threshold_med=sr_threshold_med,
-                        oracle_reward_claim=oracle_reward_claim, captcha_reward=captcha_reward,
-                        initial_pool_balance=initial_pool_balance, rng_seed=rng_seed,
-                        n_synthetic_users=n_synthetic_users,
-                        tier_bronze_pct=tier_bronze_pct, tier_silver_pct=tier_silver_pct,
-                        tier_gold_pct=tier_gold_pct, tier_platinum_pct=tier_platinum_pct,
-                        fraud_rate=fraud_rate, omit_oracle_fraud=omit_oracle_fraud,
-                        n_oracles=n_oracles, n_oracles_per_claim=n_oracles_per_claim,
-                        divergence_threshold=divergence_threshold,
-                        entry_divergences=entry_divergences, watchlist_months=watchlist_months,
-                        oracle_stake_min=oracle_stake_min, slash_deposit=slash_deposit,
-                        slash_pool_pct=slash_pool_pct, slash_reporter_pct=slash_reporter_pct,
-                        slash_jury_pct=slash_jury_pct,
-                        fs_bronze=fs_bronze, fs_silver=fs_silver, fs_gold=fs_gold,
-                        fs_platinum=fs_platinum, fs_auto_approve=fs_auto_approve,
-                        fs_captcha=fs_captcha, cr_very_susp=cr_very_susp,
-                        cr_susp_high=cr_susp_high, cr_susp_med=cr_susp_med,
-                        b2s_swaps=b2s_swaps, b2s_days=b2s_days, b2s_maxfs=b2s_maxfs,
-                        s2g_swaps=s2g_swaps, s2g_days=s2g_days, s2g_maxfs=s2g_maxfs,
-                        pt_stake=pt_stake,
-                    )
+                    _cfg_pr = copy.deepcopy(_make_cfg())
                     for _sec, _kvals in _pr_data["overrides"].items():
                         _cfg_pr.setdefault(_sec, {}).update(_kvals)
                     with st.spinner("Simulazione…"):
@@ -1780,12 +1682,9 @@ P = V × [(Patt × L%) + (Tint × E/(1−E)) / (Vbase × 1000)] × (1+M) × Fcov
         st.markdown(
             f"""
 ```
-FraudScore = Score Tier + Score Claim Rate + Score Network
-Range: 0–130 punti
+FraudScore = Score Claim Rate + Score Network
+Range: 0–80 punti
 ```
-
-**Score Tier (0–50):**
-- Bronze = {fs_bronze} | Silver = {fs_silver} | Gold = {fs_gold} | Platinum = {fs_platinum}
 
 **Score Claim Rate (0–30):**
 - Claim Rate = claim totali / swap totali
@@ -1798,31 +1697,8 @@ Range: 0–130 punti
 - Distanza 3 → +15 | Distanza 4–15 → valore crescente
 
 **Decisione finale:**
-- Score < {fs_auto_approve} → Approvato automaticamente (Gold/Platinum o Mode 1); altrimenti CAPTCHA
-- {fs_auto_approve} ≤ Score ≤ {fs_captcha} → CAPTCHA richiesto (tutti i tier)
+- Score < {fs_auto_approve} → Approvato automaticamente
+- {fs_auto_approve} ≤ Score ≤ {fs_captcha} → CAPTCHA richiesto
 - Score > {fs_captcha} → Rigettato + blacklist
-"""
-        )
-
-    with st.expander("🏅 Tier System — Come Funziona"):
-        st.markdown(
-            f"""
-| Tier | Descrizione |
-|---|---|
-| **Bronze** | Tier iniziale per tutti i nuovi utenti |
-| **Silver** | Capitale max esteso, accesso prioritario |
-| **Gold** | Limite swap giornalieri aumentato |
-| **Platinum** | Stake volontario, swap illimitati, FraudScore base 0 |
-
-**Upgrade automatico Bronze → Silver:**
-≥ {b2s_swaps} swap | ≥ {b2s_days} giorni attivi | FraudScore medio ≤ {b2s_maxfs}
-
-**Upgrade automatico Silver → Gold:**
-≥ {s2g_swaps} swap | ≥ {s2g_days} giorni attivi | FraudScore medio ≤ {s2g_maxfs}
-
-**Upgrade manuale Gold → Platinum:**
-CAPTCHA + deposito stake ({pt_stake}% del limite swap desiderato)
-
-*Tutti i valori soglia sono modificabili nell'expander "Parametri Upgrade Tier" nella sidebar.*
 """
         )

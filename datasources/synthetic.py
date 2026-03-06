@@ -1,7 +1,7 @@
 """
 Mode 2 datasource — fully synthetic swaps with a real Patt baseline loaded
-from SQLite (table patt_history).  All users are generated with Bronze tier
-and advance through Bronze → Silver → Gold → Platinum over time.
+from SQLite (table patt_history).  All users are treated uniformly with no
+tier system.
 """
 from __future__ import annotations
 
@@ -22,7 +22,6 @@ from .base import BaseDataSource, Swap
 @dataclass
 class UserState:
     user_id: str
-    tier: str                = "bronze"
     is_fraudulent: bool      = False
     total_swaps: int         = 0
     total_claims: int        = 0
@@ -31,7 +30,6 @@ class UserState:
     avg_fraud_score: float   = 0.0
     fraud_score_history: List[int] = field(default_factory=list)
     daily_swaps_today: int   = 0
-    capital_eth: float       = 0.0  # Platinum stake
 
     @property
     def claim_rate(self) -> float:
@@ -66,6 +64,7 @@ class SyntheticDataSource(BaseDataSource):
         self.fraud_rate: float         = uc["fraud_rate"]
         self.swap_freq_mean: float     = uc["swap_frequency_mean"]
         self.coverage_dist: dict       = uc["coverage_distribution"]
+        self.max_daily_swaps: int      = int(uc.get("max_daily_swaps", 99))
 
         # If set, all swaps use this coverage level instead of random distribution
         self._default_coverage: Optional[str] = coverage.lower() if coverage else None
@@ -73,8 +72,7 @@ class SyntheticDataSource(BaseDataSource):
         self._patt_history: List[float] = self._load_patt_history()
         self._users: Dict[str, UserState] = {}
         self._next_user_id: int = 0
-        initial_tier_dist = config.get("users", {}).get("initial_tier_distribution")
-        self._spawn_users(self.initial_count, tier_dist=initial_tier_dist)
+        self._spawn_users(self.initial_count)
 
     # ------------------------------------------------------------------
     # Patt loading
@@ -94,6 +92,10 @@ class SyntheticDataSource(BaseDataSource):
         return [0.01] * self.duration_days
 
     def get_patt(self, day: int) -> float:
+        # If a specific attack_rate override is in config, use it directly
+        override = self.config.get("market", {}).get("attack_rate")
+        if override is not None:
+            return float(np.clip(override, 0.001, 0.5))
         idx = day % len(self._patt_history)
         base = self._patt_history[idx]
         delta = self.rng.uniform(-self.patt_osc, self.patt_osc)
@@ -103,36 +105,18 @@ class SyntheticDataSource(BaseDataSource):
     # User management
     # ------------------------------------------------------------------
 
-    def _spawn_users(self, n: int, tier_dist: dict | None = None) -> None:
-        """Spawn *n* users, optionally assigning initial tiers from *tier_dist*.
-
-        *tier_dist* is a dict {"bronze": f, "silver": f, "gold": f, "platinum": f}
-        where values are fractions summing to 1.  When None, all users start as Bronze.
-        """
-        tiers_list: list[str] = []
-        if tier_dist:
-            # Build a weighted list of initial tiers
-            for tier_name, frac in tier_dist.items():
-                count = max(0, round(frac * n))
-                tiers_list.extend([tier_name] * count)
-            # Pad or trim to exactly n
-            while len(tiers_list) < n:
-                tiers_list.append("bronze")
-            tiers_list = tiers_list[:n]
-            self.rng.shuffle(tiers_list)  # type: ignore[arg-type]
-
+    def _spawn_users(self, n: int) -> None:
         for i in range(n):
             uid = f"user_{self._next_user_id:06d}"
             self._next_user_id += 1
             is_fraud = self.rng.random() < self.fraud_rate
-            initial_tier = tiers_list[i] if tiers_list else "bronze"
             self._users[uid] = UserState(
-                user_id=uid, is_fraudulent=is_fraud, tier=initial_tier,
+                user_id=uid, is_fraudulent=is_fraud,
             )
 
     def _grow_users(self) -> None:
         n_new = max(1, int(len(self._users) * self.growth_rate_daily))
-        self._spawn_users(n_new, tier_dist=None)  # new organic users always start as Bronze
+        self._spawn_users(n_new)
 
     # ------------------------------------------------------------------
     # Coverage assignment
@@ -170,12 +154,8 @@ class SyntheticDataSource(BaseDataSource):
             if user.is_blacklisted:
                 continue
 
-            tier_limits = self.config.get("tiers", {})
-            tier_cfg = tier_limits.get(user.tier, {})
-            max_daily = int(tier_cfg.get("max_daily_swaps", 99))
-
             n_swaps = int(self.rng.poisson(self.swap_freq_mean))
-            n_swaps = min(n_swaps, max_daily)
+            n_swaps = min(n_swaps, self.max_daily_swaps)
 
             for i in range(n_swaps):
                 value_eth = float(self.rng.lognormal(mean=0.4, sigma=0.8))
@@ -204,7 +184,7 @@ class SyntheticDataSource(BaseDataSource):
                         loss_eth=loss_eth,
                         coverage=coverage,
                         user_id=uid,
-                        user_tier=user.tier,
+                        user_tier=None,
                         tx_hash=tx,
                     )
                 )
@@ -217,7 +197,7 @@ class SyntheticDataSource(BaseDataSource):
         return self.duration_days
 
     # ------------------------------------------------------------------
-    # Expose user states (used by runner and tier manager)
+    # Expose user states (used by runner)
     # ------------------------------------------------------------------
 
     @property
