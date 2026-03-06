@@ -64,7 +64,7 @@ POOL_ADDRESSES: Dict[str, List[str]] = {
     "Curve": [],
 }
 
-CHUNK_SIZE     = 2000
+CHUNK_SIZE     = 500
 BLOCKS_PER_DAY = 6646
 
 # Converti tutti gli indirizzi pool in checksum format (richiesto da eth_getLogs Infura)
@@ -265,7 +265,14 @@ def fetch_dex_events(
 
     total_sw  = len(swaps)
     total_atk = len(sandwich_attacks)
-    patt_value = total_atk / max(total_sw, 1)
+    raw_ratio = total_atk / max(total_sw, 1)
+    if total_sw >= 10000:
+        ms = 0.05
+    elif total_sw >= 1000:
+        ms = 0.10
+    else:
+        ms = 0.20
+    patt_value = float(np.clip(raw_ratio * (1 + ms), 0.001, 0.5))
 
     result = {
         "swaps": swaps,
