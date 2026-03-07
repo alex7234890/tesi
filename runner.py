@@ -143,13 +143,29 @@ def run_single(
         today_claims       = []
         today_swap_details = []
 
-        # Per-day swap value stats
-        avg_swap_value_eth = (
-            sum(s.value_eth for s in swaps) / max(len(swaps), 1)
-        )
+        # Per-day counters (reset each day)
+        n_real_attacks     = 0
+        n_fraud_caught     = 0
+        n_fraud_escaped    = 0
+        payout_real_today  = 0.0
+        payout_fraud_today = 0.0
+
+        # Average swap value for tint computation
+        avg_swap_value_eth = sum(s.value_eth for s in swaps) / max(len(swaps), 1)
 
         for swap in swaps:
-            # ---- Premium for this insured swap ----
+            # ---- Per-swap fraud classification ----
+            # Only non-attacked swaps can be fraudulent claimants
+            is_fraud_caught  = False
+            is_fraud_escaped = False
+            if not swap.is_attacked and fraud_claim_pct > 0.0:
+                if rng.random() < fraud_claim_pct:
+                    if rng.random() < (1.0 - e_cfg):
+                        is_fraud_caught = True   # detected, blocked
+                    else:
+                        is_fraud_escaped = True  # slipped through
+
+            # ---- Premium — ALL tx (real, fraud, normal) pay premium ----
             premium = compute_premium(
                 value_eth=swap.value_eth,
                 patt=patt,
@@ -162,12 +178,47 @@ def run_single(
             )
             pool.add_premium(premium)
             pool.register_policy()
+            premium_pct = premium / swap.value_eth * 100.0 if swap.value_eth > 0 else 0.0
 
-            # Premium percentage of swap value
-            premium_pct = (premium / swap.value_eth * 100.0) if swap.value_eth > 0 else 0.0
+            # ---- Payout / claim classification ----
+            payout_eth      = 0.0
+            claim_submitted = swap.is_attacked or is_fraud_caught or is_fraud_escaped
+            claim_approved  = False
+            tipo_claim      = "nessuno"
 
-            # Start building swap detail record
-            swap_detail: dict = {
+            if swap.is_attacked:
+                tipo_claim    = "reale"
+                claim_approved = True
+                n_real_attacks += 1
+                user = users.get(swap.user_id) if users else None
+                pool.register_pending_claim(swap.loss_eth)
+                claim = claim_proc.process(swap=swap)
+                pool.resolve_pending_claim(swap.loss_eth)
+                today_claims.append(claim)
+                payout_eth = claim.payout_eth
+                pool.add_payout(payout_eth)
+                payout_real_today += payout_eth
+                if user:
+                    user.total_claims += 1
+
+            elif is_fraud_caught:
+                tipo_claim = "frode_intercettata"
+                # Fraud detected — no payout; premium was already collected above
+                n_fraud_caught += 1
+
+            elif is_fraud_escaped:
+                tipo_claim    = "frode_scappata"
+                claim_approved = True
+                # Fraudulent payout: simulated loss at l_pct of swap value
+                fcov_sw    = _FCOV_PAYOUT.get(swap.coverage.lower(), 1.00)
+                payout_eth = swap.value_eth * l_pct * fcov_sw
+                pool.add_payout(payout_eth)
+                payout_fraud_today += payout_eth
+                n_fraud_escaped += 1
+
+            rimborso_pct = payout_eth / swap.value_eth * 100.0 if swap.value_eth > 0 else 0.0
+
+            today_swap_details.append({
                 "swap_id":         swap.tx_hash,
                 "value_ETH":       swap.value_eth,
                 "was_attacked":    swap.is_attacked,
@@ -175,87 +226,19 @@ def run_single(
                 "coverage_level":  swap.coverage,
                 "premium_paid":    premium,
                 "premium_pct":     round(premium_pct, 4),
-                "claim_submitted": False,
-                "claim_approved":  False,
-                "payout_ETH":      0.0,
-                "rimborso_pct":    0.0,
-                "tipo_claim":      "nessuno",
-            }
-
-            # ---- Claim if attacked ----
-            if swap.is_attacked:
-                user = users.get(swap.user_id) if users else None
-
-                pool.register_pending_claim(swap.loss_eth)
-                claim = claim_proc.process(swap=swap)
-                pool.resolve_pending_claim(swap.loss_eth)
-                today_claims.append(claim)
-
-                rimborso_pct = (claim.payout_eth / swap.value_eth * 100.0) if swap.value_eth > 0 else 0.0
-                swap_detail["claim_submitted"] = True
-                swap_detail["claim_approved"]  = True
-                swap_detail["payout_ETH"]      = claim.payout_eth
-                swap_detail["rimborso_pct"]    = round(rimborso_pct, 4)
-                swap_detail["tipo_claim"]      = "reale"
-
-                pool.add_payout(claim.payout_eth)
-                if user:
-                    user.total_claims += 1
-
-                logger.debug(
-                    f"APPROVED  payout={claim.payout_eth:.4f} ETH  user={swap.user_id}"
-                )
-
-            today_swap_details.append(swap_detail)
-
-        # ---- Fraud claim logic (aggregate, on top of real attacks) ----
-        n_real_attacks   = sum(1 for s in swaps if s.is_attacked)
-        n_fraud_attempts = round(n_real_attacks * fraud_claim_pct)
-        n_fraud_caught   = round(n_fraud_attempts * (1.0 - e_cfg))
-        n_fraud_escaped  = n_fraud_attempts - n_fraud_caught
-
-        # Payout for escaped fraud claims
-        avg_loss_eth = l_pct * avg_swap_value_eth
-        fraud_payout = n_fraud_escaped * avg_loss_eth * fcov_payout
-        if fraud_payout > 0:
-            pool.add_payout(fraud_payout)
-
-        # Add synthetic rows for fraud claims in swap details table
-        for _ in range(n_fraud_caught):
-            today_swap_details.append({
-                "swap_id":         f"fraud_caught_day{day}",
-                "value_ETH":       avg_swap_value_eth,
-                "was_attacked":    False,
-                "insured":         True,
-                "coverage_level":  coverage,
-                "premium_paid":    0.0,
-                "premium_pct":     0.0,
-                "claim_submitted": True,
-                "claim_approved":  False,
-                "payout_ETH":      0.0,
-                "rimborso_pct":    0.0,
-                "tipo_claim":      "frode_intercettata",
+                "claim_submitted": claim_submitted,
+                "claim_approved":  claim_approved,
+                "payout_ETH":      payout_eth,
+                "rimborso_pct":    round(rimborso_pct, 4),
+                "tipo_claim":      tipo_claim,
             })
-        for _ in range(n_fraud_escaped):
-            payout_fr = avg_loss_eth * fcov_payout
-            today_swap_details.append({
-                "swap_id":         f"fraud_escaped_day{day}",
-                "value_ETH":       avg_swap_value_eth,
-                "was_attacked":    False,
-                "insured":         True,
-                "coverage_level":  coverage,
-                "premium_paid":    0.0,
-                "premium_pct":     0.0,
-                "claim_submitted": True,
-                "claim_approved":  True,
-                "payout_ETH":      payout_fr,
-                "rimborso_pct":    round(payout_fr / avg_swap_value_eth * 100.0, 4) if avg_swap_value_eth > 0 else 0.0,
-                "tipo_claim":      "frode_scappata",
-            })
+
+        n_fraud_attempts = n_fraud_caught + n_fraud_escaped
 
         logger.debug(
-            f"Day {day}: fraud_attempts={n_fraud_attempts} caught={n_fraud_caught} "
-            f"escaped={n_fraud_escaped} payout={fraud_payout:.4f} ETH"
+            f"Day {day}: real_atk={n_real_attacks} fraud_caught={n_fraud_caught} "
+            f"fraud_escaped={n_fraud_escaped} "
+            f"payout_real={payout_real_today:.4f} payout_fraud={payout_fraud_today:.4f}"
         )
 
         # ---- End-of-day accounting ----
@@ -277,7 +260,6 @@ def run_single(
         prev_total_payouts  = pool.total_payouts_eth
 
         # ---- Update dynamic tint/vbase for next day ----
-        # tint_next = frodi intercettate oggi × valore medio swap
         tint_prev  = n_fraud_caught * avg_swap_value_eth
         vbase_prev = float(len(swaps))
 
@@ -297,10 +279,13 @@ def run_single(
             tint=tint_today,
             e=e_cfg,
             vbase=vbase_today,
+            n_real_attacks=n_real_attacks,
             n_fraud_attempts=n_fraud_attempts,
             n_fraud_caught=n_fraud_caught,
             n_fraud_escaped=n_fraud_escaped,
             avg_swap_value_eth=avg_swap_value_eth,
+            payout_real_today=payout_real_today,
+            payout_fraud_today=payout_fraud_today,
         )
 
     logger.info("Simulation complete.")

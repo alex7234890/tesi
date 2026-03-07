@@ -70,6 +70,8 @@ for _k, _v in [
     ("infura_api_key", _read_infura_key_from_config()),
     ("confirm_clear_cache", False),
     ("infura_patt_value", None),
+    ("infura_last_result", None),
+    ("batch_results", None),
 ]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
@@ -370,8 +372,8 @@ if export_btn and st.session_state["results"]:
 # =========================================================================
 st.title("🛡️ MEV Insurance Protocol Simulator")
 
-tab_sim, tab_infura, tab_istr = st.tabs(
-    ["📊 Simulazione", "🔗 Dati Infura", "📖 Istruzioni"]
+tab_sim, tab_batch, tab_infura, tab_istr = st.tabs(
+    ["📊 Simulazione", "🔁 Batch Simulazioni", "🔗 Dati Infura", "📖 Istruzioni"]
 )
 
 # ==========================================================================
@@ -465,6 +467,30 @@ with tab_sim:
             .apply(_highlight_bd, axis=1),
             use_container_width=True, height=300,
         )
+
+        # ---- Trend saldo pool ----
+        with st.expander("📈 Trend Saldo Pool", expanded=False):
+            _balances = first_df["pool_balance_eth"].values.astype(float)
+            _days_arr = np.arange(len(_balances), dtype=float)
+            if len(_balances) > 1:
+                _slope, _intercept = np.polyfit(_days_arr, _balances, 1)
+            else:
+                _slope, _intercept = 0.0, float(_balances[0]) if len(_balances) else 0.0
+            _trend_str = f"📈 +{_slope:.4f} ETH/giorno" if _slope >= 0 else f"📉 {_slope:.4f} ETH/giorno"
+            _giorni_zero = (-_intercept / _slope) if _slope < 0 else None
+            st.markdown(
+                f"**Trend lineare:** {_trend_str}  \n"
+                + (f"⚠️ Al trend attuale il pool si azzera in ~**{int(_giorni_zero)}** giorni"
+                   if _giorni_zero and _giorni_zero > 0 else "✅ Trend positivo o neutro")
+            )
+            _changes = [_balances[i] - _balances[i-1] for i in range(1, len(_balances))]
+            _ch_df = pd.DataFrame({
+                "Giorno": list(range(1, len(_changes)+1)),
+                "Variazione (ETH)": [round(c, 4) for c in _changes],
+                "Saldo (ETH)": [round(b, 4) for b in _balances[1:]],
+                "Δ": ["📈" if c >= 0 else "📉" for c in _changes],
+            })
+            st.dataframe(_ch_df, use_container_width=True, hide_index=True, height=200)
 
         st.markdown("---")
 
@@ -560,43 +586,53 @@ with tab_sim:
         row = first_df[first_df["day"] == selected_day]
         if not row.empty:
             row = row.iloc[0]
-            lc, rc = st.columns(2)
-            with lc:
-                st.markdown("**Stato Pool**")
-                net = float(row.get("net_flow_today", 0.0))
-                st.dataframe(pd.DataFrame({
-                    "Metrica": ["Saldo Pool (ETH)","Passività Pendenti (ETH)","Solvency Ratio",
-                                "M_adj","Patt","Premi oggi (ETH)","Payout oggi (ETH)",
-                                "Flusso netto (ETH)"],
-                    "Valore": [
-                        f"{float(row['pool_balance_eth']):.4f}",
-                        f"{float(row.get('pending_liabilities_eth',0)):.4f}",
-                        f"{float(row['solvency_ratio']):.4f}",
-                        f"{float(row.get('madj_current',0)):.2f}",
-                        f"{float(row.get('patt_current',0)):.2%}",
-                        f"{float(row.get('premiums_today',0)):.4f}",
-                        f"{float(row.get('payouts_today',0)):.4f}",
-                        f"{'+' if net>=0 else ''}{net:.4f}",
-                    ]
-                }), use_container_width=True, hide_index=True)
-
-            with rc:
-                st.markdown("**Attività del Giorno**")
-                n_sw  = int(row.get("n_swaps_this_tick", 0))
-                n_atk = int(row.get("n_attacks_this_tick", 0))
-                n_ins = int(row.get("n_swaps_insured", n_sw))
-                st.dataframe(pd.DataFrame({
-                    "Metrica": ["Swap processati","  — attaccati","  — assicurati",
-                                "Claim inviati","Claim approvati","Payout medio (ETH)"],
-                    "Valore": [
-                        str(n_sw),
-                        f"{n_atk} ({n_atk/max(n_sw,1):.1%})",
-                        str(n_ins),
-                        str(int(row.get("n_claims_submitted",0))),
-                        str(int(row.get("n_claims_approved",0))),
-                        f"{float(row.get('avg_payout_eth',0)):.4f}",
-                    ]
-                }), use_container_width=True, hide_index=True)
+            # ---- Full breakdown table ----
+            n_sw      = int(row.get("n_swaps_this_tick", 0))
+            n_ra      = int(row.get("n_real_attacks", 0))
+            n_fc      = int(row.get("n_fraud_caught", 0))
+            n_fe      = int(row.get("n_fraud_escaped", 0))
+            n_normal  = max(n_sw - n_ra - n_fc - n_fe, 0)
+            net       = float(row.get("net_flow_today", 0.0))
+            pr_today  = float(row.get("payout_real_today", 0.0))
+            pf_today  = float(row.get("payout_fraud_today", 0.0))
+            tint_d    = float(row.get("tint_today", 0.0))
+            vbase_d   = float(row.get("vbase_today", 100.0))
+            st.dataframe(pd.DataFrame({
+                "Metrica": [
+                    "Swap totali",
+                    "  — normali",
+                    "  — attacchi reali",
+                    "  — frodi intercettate",
+                    "  — frodi scappate",
+                    "Premi incassati (tutti)",
+                    "Payout erogati",
+                    "    da attacchi reali",
+                    "    da frodi scappate",
+                    "Tint (frodi intercettate × avg_swap)",
+                    "Vbase (swap ieri)",
+                    "Variazione netta pool",
+                    "Saldo pool",
+                    "Solvency Ratio (solo per M_adj)",
+                    "M_adj applicato oggi",
+                ],
+                "Valore": [
+                    str(n_sw),
+                    str(n_normal),
+                    f"{n_ra} ({n_ra/max(n_sw,1):.1%})",
+                    f"{n_fc} ({n_fc/max(n_sw,1):.1%})",
+                    f"{n_fe} ({n_fe/max(n_sw,1):.1%})",
+                    f"{float(row.get('premiums_today',0)):.4f} ETH",
+                    f"{float(row.get('payouts_today',0)):.4f} ETH",
+                    f"{pr_today:.4f} ETH",
+                    f"{pf_today:.4f} ETH",
+                    f"{tint_d:.4f} ETH",
+                    f"{vbase_d:.0f} swap",
+                    f"{'+' if net>=0 else ''}{net:.4f} ETH",
+                    f"{float(row['pool_balance_eth']):.4f} ETH",
+                    f"{float(row['solvency_ratio']):.4f}",
+                    f"{float(row.get('madj_current',0)):.4f}",
+                ]
+            }), use_container_width=True, hide_index=True)
 
             # ---- Formula breakdown for selected day ----
             with st.expander("📐 Formula Premio — Calcolo del Giorno", expanded=False):
@@ -784,7 +820,168 @@ with tab_sim:
 
 
 # ==========================================================================
-# TAB 2 — DATI INFURA
+# ==========================================================================
+# TAB 2 — BATCH SIMULAZIONI
+# ==========================================================================
+with tab_batch:
+    st.subheader("🔁 Batch Simulazioni")
+    st.markdown("Esegui N simulazioni variando i parametri. Analizza la distribuzione dei risultati.")
+
+    b1, b2 = st.columns([1, 2])
+    with b1:
+        _bn_sims = st.number_input("N simulazioni", min_value=2, max_value=400, value=10, step=1, key="batch_n")
+        _b_mode  = st.radio("Modalità", [2, 1], format_func=lambda m: "Mode 2 — Sintetica" if m==2 else "Mode 1 — Reale", key="batch_mode")
+    with b2:
+        _b_params = st.multiselect(
+            "Parametri variabili",
+            ["Patt", "L%", "E (FNR)", "Frodi%", "Pool iniziale"],
+            default=["Patt", "E (FNR)"],
+            key="batch_vars",
+        )
+
+    # Per-parameter range config
+    _b_ranges: dict = {}
+    if _b_params:
+        st.markdown("**Range per parametro variabile:**")
+        _pc_cols = st.columns(min(len(_b_params), 3))
+        for _bi, _bp in enumerate(_b_params):
+            with _pc_cols[_bi % len(_pc_cols)]:
+                st.markdown(f"*{_bp}*")
+                _bmode_p = st.selectbox("Modalità", ["Range lineare", "Casuale nel range", "Fisso"],
+                                        key=f"batch_pmode_{_bi}")
+                if _bmode_p == "Fisso":
+                    _bfv = st.number_input("Valore fisso", value=0.10, key=f"batch_fixed_{_bi}")
+                    _b_ranges[_bp] = ("fixed", _bfv, _bfv)
+                else:
+                    _bmin = st.number_input("Min", value=0.02, key=f"batch_min_{_bi}")
+                    _bmax = st.number_input("Max", value=0.20, key=f"batch_max_{_bi}")
+                    _b_ranges[_bp] = ("linear" if _bmode_p=="Range lineare" else "random", _bmin, _bmax)
+
+    _batch_run_btn = st.button("▶ Avvia Batch", type="primary", key="batch_run_btn")
+
+    if _batch_run_btn:
+        _b_results = []
+        _b_prog    = st.progress(0, text="Avvio batch…")
+        _b_cfg_base = _make_cfg(mode=_b_mode)
+
+        for _bi in range(int(_bn_sims)):
+            # Generate params for this run
+            _run_p: dict = {}
+            for _bp, (_bmt, _bmn, _bmx) in _b_ranges.items():
+                if _bmt == "fixed":
+                    _rv = _bmn
+                elif _bmt == "linear":
+                    _rv = _bmn + (_bmx - _bmn) * _bi / max(int(_bn_sims)-1, 1)
+                else:
+                    import random as _rand
+                    _rv = _rand.uniform(_bmn, _bmx)
+                _run_p[_bp] = round(float(_rv), 6)
+
+            import copy as _copy
+            _rc = _copy.deepcopy(_b_cfg_base)
+            _rc["simulation"]["seed"] = (int(_time_mod.time() * 1000) + _bi) % 99999
+            if "Patt"        in _run_p: _rc["market"]["attack_rate"]       = _run_p["Patt"]
+            if "L%"          in _run_p: _rc["market"]["loss_pct_mean"]     = _run_p["L%"]
+            if "E (FNR)"     in _run_p: _rc["market"]["e"]                 = _run_p["E (FNR)"]
+            if "Frodi%"      in _run_p: _rc["simulation"]["fraud_claim_pct"]= _run_p["Frodi%"]
+            if "Pool iniziale" in _run_p: _rc["pool"]["initial_balance_eth"]= _run_p["Pool iniziale"]
+
+            try:
+                _c, _p, _s = run_single(_rc, mode=_b_mode, coverage=coverage, db_path=_DB_PATH)
+                _df_run = _c.to_dataframe()
+                _b_results.append({
+                    "run": _bi + 1,
+                    **_run_p,
+                    "pool_survived":    _s["pool_survived"],
+                    "profitto_eth":     round(_s["total_profit_eth"], 4),
+                    "sr_finale":        round(_s["final_solvency_ratio"], 4),
+                    "giorno_rottura":   (_s.get("breakdown_event") or {}).get("day"),
+                    "trend_slope":      round(_s.get("trend_slope", 0.0), 4),
+                    "_df":              _df_run,
+                })
+            except Exception as _bex:
+                _b_results.append({
+                    "run": _bi + 1, **_run_p,
+                    "pool_survived": False, "profitto_eth": 0.0,
+                    "sr_finale": 0.0, "giorno_rottura": 0,
+                    "trend_slope": 0.0, "_df": None,
+                    "_error": str(_bex),
+                })
+            _b_prog.progress((_bi + 1) / int(_bn_sims), text=f"Run {_bi+1}/{_bn_sims}…")
+
+        st.session_state["batch_results"] = _b_results
+        _b_prog.progress(100, text="✅ Batch completato!")
+        st.rerun()
+
+    # --- Show results ---
+    _br = st.session_state.get("batch_results")
+    if _br:
+        _br_clean = [{k: v for k, v in r.items() if not k.startswith("_")} for r in _br]
+        _br_df    = pd.DataFrame(_br_clean)
+
+        st.markdown("---")
+        st.subheader("A — Riepilogo tutte le run")
+
+        def _color_row(row):
+            if not row.get("pool_survived", True):
+                return ["background-color: #ffcccc"] * len(row)
+            elif row.get("trend_slope", 0) > 0:
+                return ["background-color: #ccffcc"] * len(row)
+            return [""] * len(row)
+
+        st.dataframe(
+            _br_df.style.apply(_color_row, axis=1),
+            use_container_width=True, hide_index=True, height=300,
+        )
+
+        st.download_button(
+            "📥 Scarica CSV batch",
+            data=_br_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"batch_{len(_br)}runs.csv",
+            mime="text/csv",
+            key="batch_csv_dl",
+        )
+
+        st.markdown("---")
+        st.subheader("B — Simulazioni fallite")
+        _failed = [r for r in _br_clean if not r.get("pool_survived", True)]
+        _fa, _fb = st.columns(2)
+        _fa.metric("Simulazioni fallite", f"{len(_failed)}/{len(_br)}")
+        _fb.metric("Tasso sopravvivenza", f"{(1-len(_failed)/max(len(_br),1))*100:.0f}%")
+        if _failed:
+            st.dataframe(pd.DataFrame(_failed), use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+        st.subheader("C — Distribuzione trend")
+        _slopes = [r.get("trend_slope", 0) for r in _br_clean if r.get("trend_slope") is not None]
+        if _slopes:
+            _pos = sum(1 for s in _slopes if s > 0)
+            st.markdown(
+                f"Trend positivo (pool cresce): **{_pos}/{len(_slopes)}** simulazioni  \n"
+                f"Trend medio: **{np.mean(_slopes):.4f} ETH/giorno**  \n"
+                f"Miglior trend: **{max(_slopes):.4f}** ETH/giorno  \n"
+                f"Peggior trend: **{min(_slopes):.4f}** ETH/giorno"
+            )
+            _sl_df = pd.DataFrame({"Run": range(1, len(_slopes)+1), "Trend (ETH/gg)": _slopes})
+            st.bar_chart(_sl_df.set_index("Run"))
+
+        st.markdown("---")
+        st.subheader("D — Dettaglio singola run")
+        _sel_run = st.selectbox(
+            "Seleziona run",
+            [f"Run {r['run']}" for r in _br_clean],
+            key="batch_detail_run",
+        )
+        _sel_idx = int(_sel_run.split()[1]) - 1
+        _sel_r   = _br[_sel_idx]
+        _sel_df  = _sel_r.get("_df")
+        st.json({k: v for k, v in _sel_r.items() if not k.startswith("_")})
+        if _sel_df is not None:
+            st.dataframe(_sel_df, use_container_width=True, height=300)
+
+
+# ==========================================================================
+# TAB 3 — DATI INFURA
 # ==========================================================================
 with tab_infura:
     st.subheader("🔗 Dati Infura — Gestione e Download")
@@ -856,6 +1053,16 @@ with tab_infura:
                 _m   = _res["metadata"]
                 _pv2 = _m.get("patt_value", 0.0)
                 st.session_state["infura_patt_value"] = _pv2
+                # Prepare lightweight example for "Come funziona" section
+                _sw_hashes = set()
+                for _sa in _res["sandwich_attacks"]:
+                    _sw_hashes.update([_sa["frontrun_tx"], _sa["victim_tx"], _sa["backrun_tx"]])
+                _ex_non_sw = next((s for s in _res["swaps"] if s["tx_hash"] not in _sw_hashes), None)
+                st.session_state["infura_last_result"] = {
+                    "metadata": _m,
+                    "example_sandwich": _res["sandwich_attacks"][0] if _res["sandwich_attacks"] else None,
+                    "example_non_sandwich": _ex_non_sw,
+                }
                 st.success(f"✅ {_m['total_swaps']:,} swap | {_m['total_sandwiches']:,} sandwich | Patt={_pv2:.2%} | {_m['infura_calls_used']} chiamate")
                 st.rerun()
             except ImportError: st.error("⚠️ `web3` non installato. `pip install web3`")
@@ -941,11 +1148,14 @@ with tab_infura:
     if _dbe2:
         try:
             _bc2 = sqlite3.connect(_DB_PATH, check_same_thread=False)
-            # Blocchi con data, ora e numero swap
             _block_rows = _bc2.execute(
                 "SELECT block_number, timestamp, COUNT(*) as n_swaps "
                 "FROM swaps GROUP BY block_number ORDER BY block_number"
             ).fetchall()
+            # sandwich count per block
+            _sw_per_blk = dict(_bc2.execute(
+                "SELECT block_number, COUNT(*) FROM sandwich_attacks GROUP BY block_number"
+            ).fetchall())
             _bc2.close()
             if _block_rows:
                 import datetime as _dt
@@ -957,18 +1167,29 @@ with tab_infura:
                         _time_s = _dt_obj.strftime("%H:%M:%S")
                     except Exception:
                         _date_s, _time_s = "—", "—"
+                    _n_sw_blk = _sw_per_blk.get(bn, 0)
+                    _pct_sw   = round(_n_sw_blk / ns * 100, 2) if ns > 0 else 0.0
                     _br_data.append({
-                        "Blocco #":   bn,
-                        "Data (UTC)": _date_s,
-                        "Ora (UTC)":  _time_s,
-                        "Swap":       ns,
+                        "Blocco #":             bn,
+                        "Data (UTC)":           _date_s,
+                        "Ora (UTC)":            _time_s,
+                        "Swap totali nel pool": ns,
+                        "Di cui sandwich":      _n_sw_blk,
+                        "% sandwich":           _pct_sw,
                     })
                 _br_df = pd.DataFrame(_br_data)
                 st.dataframe(_br_df, use_container_width=True, hide_index=True, height=250)
                 st.caption(
-                    f"Periodo: blocco #{_br_data[0]['Blocco #']:,} ({_br_data[0]['Data (UTC)']} {_br_data[0]['Ora (UTC)']}) "
-                    f"→ #{_br_data[-1]['Blocco #']:,} ({_br_data[-1]['Data (UTC)']} {_br_data[-1]['Ora (UTC)']})"
+                    f"Periodo: blocco #{_br_data[0]['Blocco #']:,} "
+                    f"({_br_data[0]['Data (UTC)']} {_br_data[0]['Ora (UTC)']}) "
+                    f"→ #{_br_data[-1]['Blocco #']:,} "
+                    f"({_br_data[-1]['Data (UTC)']} {_br_data[-1]['Ora (UTC)']})"
                     f" | {len(_br_data)} blocchi con swap"
+                )
+                st.caption(
+                    "**Swap totali nel pool** = tutti gli eventi Swap rilevati da `eth_getLogs` "
+                    "per quel pool in quel blocco. "
+                    "**Di cui sandwich** = sandwich attack individuati con frontrun in quel blocco."
                 )
             else:
                 st.info("Nessun dato di blocco disponibile.")
@@ -978,17 +1199,65 @@ with tab_infura:
         st.info("Scarica i dati per vedere il dettaglio dei blocchi.")
 
     st.markdown("---")
-    st.markdown("### Come Funziona il Fetch")
-    st.markdown("""
+    st.markdown("### 🔍 Come Funziona il Rilevamento Sandwich")
+
+    _ilr = st.session_state.get("infura_last_result")
+    if _ilr:
+        _meta  = _ilr["metadata"]
+        _esw   = _ilr.get("example_sandwich")
+        _ensw  = _ilr.get("example_non_sandwich")
+        _ts    = _meta.get("total_swaps", 0)
+        _ta    = _meta.get("total_sandwiches", 0)
+        _raw   = _meta.get("raw_ratio", _ta / max(_ts, 1))
+        _ms    = _meta.get("ms_applied", 0.10)
+        _patt  = _meta.get("patt_value", _raw * (1 + _ms))
+        _vol_s = "≥10.000" if _ts >= 10000 else "1.000–9.999" if _ts >= 1000 else "<1.000"
+        from scripts.download_blocks import CHUNK_SIZE as _CS
+        st.markdown(
+            f"**Fetch:** `eth_getLogs` scarica tutti gli eventi Swap in chunk da {_CS} blocchi. "
+            f"Nessun fetch blocco per blocco.\n\n"
+            f"**Rilevamento:** per ogni tripla consecutiva nello stesso pool:\n"
+            f"1. Stesso `address` (pool)\n"
+            f"2. Blocchi distanti al massimo 1\n"
+            f"3. Tutti e tre gli hash diversi"
+        )
+        if _esw:
+            st.markdown("**✅ Esempio SANDWICH dall'ultimo fetch:**")
+            st.code(
+                f"frontrun:  {_esw['frontrun_tx'][:20]}…  blocco #{_esw.get('frontrun_block', _esw.get('block','?')):,}\n"
+                f"victim:    {_esw['victim_tx'][:20]}…  blocco #{_esw.get('victim_block','?'):,}\n"
+                f"backrun:   {_esw['backrun_tx'][:20]}…  blocco #{_esw.get('backrun_block','?'):,}\n"
+                f"pool:      {_esw['pool']}\n"
+                f"→ Stesso pool ✓ | Blocchi consecutivi ✓ | Hash diversi ✓",
+                language=None,
+            )
+        if _ensw:
+            st.markdown("**❌ Esempio swap NON sandwich:**")
+            st.code(
+                f"tx:      {_ensw['tx_hash'][:20]}…  blocco #{_ensw['block_number']:,}\n"
+                f"→ Nessuna tripla valida attorno a questo swap",
+                language=None,
+            )
+        st.markdown(
+            f"**Calcolo Patt:**\n"
+            f"```\n"
+            f"Sandwich:    {_ta:,}\n"
+            f"Swap totali: {_ts:,}\n"
+            f"Ratio grezzo: {_ta}/{_ts} = {_raw:.4f}\n"
+            f"ms = {_ms}  (volume {_vol_s})\n"
+            f"Patt = {_raw:.4f} × (1 + {_ms}) = {_patt:.4f}  ({_patt*100:.2f}%)\n"
+            f"```"
+        )
+    else:
+        st.info("Scarica i dati Infura per vedere esempi di rilevamento sandwich in tempo reale.")
+        st.markdown("""
 | | Vecchio | Nuovo |
 |---|---|---|
 | Strategia | 1 call/blocco | 1 call per 500 blocchi |
 | Chiamate per 2 giorni | ~13.300 | ~27 |
 | Tempo | ~94 ore | < 60 s |
 
-**Rilevamento sandwich:** tripla (frontrun, victim, backrun) stesso pool, blocchi consecutivi,
-stessa pool address, tutti e tre i tx_hash diversi — solo dati `eth_getLogs`, nessuna chiamata
-`eth_getTransactionByHash`. Più veloce e meno costoso in termini di chiamate API.
+Solo dati `eth_getLogs`, nessuna chiamata `eth_getTransactionByHash`.
 """)
 
 
