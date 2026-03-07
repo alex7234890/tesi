@@ -284,6 +284,8 @@ def fetch_dex_events(
             "days":              days,
             "total_swaps":       total_sw,
             "total_sandwiches":  total_atk,
+            "raw_ratio":         raw_ratio,
+            "ms_applied":        ms,
             "patt_value":        patt_value,
             "infura_calls_used": infura_calls,
             "dex_targets":       dex_targets,
@@ -342,13 +344,16 @@ def _detect_sandwiches(swaps: List[dict]) -> List[dict]:
         if f["tx_hash"] == v["tx_hash"] or v["tx_hash"] == b["tx_hash"] or f["tx_hash"] == b["tx_hash"]:
             continue
         sandwiches.append({
-            "frontrun_tx": f["tx_hash"],
-            "victim_tx":   v["tx_hash"],
-            "backrun_tx":  b["tx_hash"],
-            "block":       f["block_number"],
-            "pool":        f["address"],
-            "dex":         f["dex"],
-            "timestamp":   f["timestamp"],
+            "frontrun_tx":    f["tx_hash"],
+            "frontrun_block": f["block_number"],
+            "victim_tx":      v["tx_hash"],
+            "victim_block":   v["block_number"],
+            "backrun_tx":     b["tx_hash"],
+            "backrun_block":  b["block_number"],
+            "block":          f["block_number"],
+            "pool":           f["address"],
+            "dex":            f["dex"],
+            "timestamp":      f["timestamp"],
         })
     return sandwiches
 

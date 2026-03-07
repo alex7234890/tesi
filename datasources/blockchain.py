@@ -6,6 +6,7 @@ configured duration_days exceeds the available real days the data cycles.
 from __future__ import annotations
 
 import sqlite3
+import time as _time
 import uuid
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -23,6 +24,11 @@ class BlockchainDataSource(BaseDataSource):
         rng: np.random.Generator,
         coverage: str = "high",
     ) -> None:
+        # Re-seed rng with combined seed (config seed + time) so each Mode 1
+        # run produces fresh synthetic values and different insurance selection.
+        _base_seed = int(config.get("simulation", {}).get("seed", 42))
+        _time_seed = int(_time.time()) % (2 ** 20)
+        rng = np.random.default_rng((_base_seed + _time_seed) % (2 ** 32))
         super().__init__(config, db_path, rng)
         self.coverage = coverage.lower()
         self.insurance_rate: float = config["market"]["insurance_rate"]
@@ -86,12 +92,16 @@ class BlockchainDataSource(BaseDataSource):
             ]
             insured_swaps = []
             for r in insured_rows:
+                # value_eth in DB was generated with fixed seed 42 at download time;
+                # regenerate each run with self.rng for fresh randomness.
+                fresh_value = float(self.rng.lognormal(mean=0.4, sigma=0.8))
+                is_atk = bool(r["is_attacked"])
                 insured_swaps.append(
                     dict(
                         tx_hash=r["tx_hash"],
-                        value_eth=float(r["value_eth"]),
-                        is_attacked=bool(r["is_attacked"]),
-                        loss_eth=float(r["loss_eth"]),
+                        value_eth=fresh_value,
+                        is_attacked=is_atk,
+                        loss_eth=fresh_value * 0.20 if is_atk else 0.0,
                         timestamp=int(r["timestamp"]),
                         user_id=f"addr_{r['tx_hash'][:10]}",
                     )

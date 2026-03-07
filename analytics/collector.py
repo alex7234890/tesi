@@ -36,10 +36,13 @@ class MetricsCollector:
         tint: float = 0.0,
         e: float = 0.20,
         vbase: float = 100.0,
+        n_real_attacks: int = 0,
         n_fraud_attempts: int = 0,
         n_fraud_caught: int = 0,
         n_fraud_escaped: int = 0,
         avg_swap_value_eth: float = 0.0,
+        payout_real_today: float = 0.0,
+        payout_fraud_today: float = 0.0,
     ) -> None:
         n_claims   = len(claims)
         n_approved = n_claims  # all claims are approved
@@ -97,10 +100,13 @@ class MetricsCollector:
             "term2_today":        term2,
 
             # Fraud tracking
+            "n_real_attacks":     n_real_attacks,
             "n_fraud_attempts":   n_fraud_attempts,
             "n_fraud_caught":     n_fraud_caught,
             "n_fraud_escaped":    n_fraud_escaped,
             "avg_swap_value_eth": avg_swap_value_eth,
+            "payout_real_today":  payout_real_today,
+            "payout_fraud_today": payout_fraud_today,
         }
 
         # User metrics (mode 2 only)
@@ -126,11 +132,19 @@ class MetricsCollector:
         return pd.DataFrame(self.records)
 
     def summary(self, pool: "InsurancePool") -> Dict[str, Any]:
+        import numpy as np
         df = self.to_dataframe()
+        trend_slope = 0.0
+        if len(df) > 1:
+            balances = df["pool_balance_eth"].values.astype(float)
+            days     = np.arange(len(balances), dtype=float)
+            slope, _ = np.polyfit(days, balances, 1)
+            trend_slope = float(slope)
         return {
             "total_profit_eth":     pool.profit_eth,
             "final_balance_eth":    pool.balance_eth,
             "final_solvency_ratio": pool.solvency_ratio(),
             "pool_survived":        pool.survived,
             "total_days":           len(df),
+            "trend_slope":          trend_slope,
         }
