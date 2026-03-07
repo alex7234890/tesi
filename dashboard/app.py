@@ -143,12 +143,15 @@ with st.sidebar.expander("⚙️ Parametri Protocollo"):
     initial_pool_balance = st.number_input("Saldo iniziale pool (ETH)", min_value=10.0, max_value=10000.0, value=50.0, step=10.0, key="prot_pool_balance")
 
 with st.sidebar.expander("📐 Formula Premio"):
-    tint  = st.number_input("Tint — Valore MEV intercettato 24h (USD)", value=8000.0, min_value=0.0, step=100.0, key="fp_tint",
-                            help="Stima del valore totale di MEV intercettato nelle ultime 24h in USD")
-    vbase = st.number_input("Vbase — Swap assicurati 24h", value=100.0, min_value=1.0, step=10.0, key="fp_vbase",
-                            help="Numero di swap assicurati nelle ultime 24h (base di normalizzazione)")
-    e_fnr = st.slider("E — False Negative Rate", 0.01, 0.99, 0.20, 0.01, key="fp_e_fnr",
+    e_fnr = st.slider("E — False Negative Rate (FNR)", 0.01, 0.99, 0.20, 0.01, key="fp_e_fnr",
                       help="Tasso di falsi negativi (attacchi non rilevati). Usato come E/(1−E) nella formula.")
+    st.caption("ℹ️ Vbase e Tint sono calcolati automaticamente ogni giorno simulato.")
+
+with st.sidebar.expander("🚨 Parametri Frodi"):
+    fraud_claim_pct = st.slider(
+        "Percentuale frodi sui claim (%)", 0, 50, 5, step=1, key="fraud_claim_pct",
+        help="Percentuale di claim fraudolenti aggiuntivi rispetto agli attacchi reali. Es: 5% → per 50 attacchi reali, si aggiungono 2-3 claim fraudolenti.",
+    ) / 100.0
 
 with st.sidebar.expander("🔬 Parametri Mode 2 — Sintetica"):
     patt_override = st.slider("Patt manuale (tasso attacco)", 0.01, 0.50, 0.10, step=0.01, key="m2_patt_override", disabled=is_mode1, help="Base + rumore ±30% ogni giorno")
@@ -173,7 +176,7 @@ def _build_config(
     initial_pool_balance,
     n_synthetic_users, max_daily_swaps,
     patt_override,
-    tint, vbase, e_fnr,
+    e_fnr, fraud_claim_pct,
 ) -> dict:
     cfg_path = os.path.join(
         _ROOT, "config",
@@ -191,9 +194,8 @@ def _build_config(
     cfg["pool"]["solvency_thresholds"]["high_risk"]   = float(sr_threshold_med)
     cfg["pool"]["solvency_thresholds"]["medium_risk"] = float(sr_threshold_high)
     cfg["market"]["loss_pct_mean"] = float(loss_pct)
-    cfg["market"]["tint"]          = float(tint)
-    cfg["market"]["vbase"]         = float(vbase)
     cfg["market"]["e"]             = float(e_fnr)
+    cfg["simulation"]["fraud_claim_pct"] = float(fraud_claim_pct)
 
     if mode == 2:
         cfg["users"]["initial_count"]       = int(n_synthetic_users)
@@ -218,7 +220,7 @@ def _all_params() -> dict:
         initial_pool_balance=initial_pool_balance,
         patt_override=patt_override,
         n_synthetic_users=n_synthetic_users, max_daily_swaps=max_daily_swaps,
-        tint=tint, vbase=vbase, e_fnr=e_fnr,
+        e_fnr=e_fnr, fraud_claim_pct=fraud_claim_pct,
     )
 
 
@@ -236,9 +238,8 @@ def _make_cfg(**kwargs) -> dict:
         n_synthetic_users=kwargs.get("n_synthetic_users", n_synthetic_users),
         max_daily_swaps=kwargs.get("max_daily_swaps", max_daily_swaps),
         patt_override=kwargs.get("patt_override", patt_override),
-        tint=kwargs.get("tint", tint),
-        vbase=kwargs.get("vbase", vbase),
         e_fnr=kwargs.get("e_fnr", e_fnr),
+        fraud_claim_pct=kwargs.get("fraud_claim_pct", fraud_claim_pct),
     )
 
 
@@ -247,18 +248,13 @@ def _make_cfg(**kwargs) -> dict:
 # =========================================================================
 
 def render_riepilogo(p: dict) -> str:
-    _fcov  = _COVERAGE_FCOV[p["coverage_label"]]
-    reimb  = _COVERAGE_REIMB[p["coverage_label"]]
+    _fcov   = _COVERAGE_FCOV[p["coverage_label"]]
+    reimb   = _COVERAGE_REIMB[p["coverage_label"]]
     patt_ex = p["patt_override"] if p["mode"] == 2 else 0.05
     M_total = p["mbase"]
     _e      = float(p["e_fnr"])
     _e_safe = max(min(_e, 0.9999), 0.0001)
-    _tint   = float(p["tint"])
-    _vbase  = float(p["vbase"])
-    term1   = patt_ex * p["loss_pct"]
-    term2   = (_tint * (_e_safe / (1.0 - _e_safe))) / (_vbase * 1000.0)
-    prem_ex = (term1 + term2) * (1.0 + M_total) * _fcov
-    pct_val = prem_ex * 100.0
+    _fcp    = float(p["fraud_claim_pct"])
 
     mode_str = "Mode 1 — Dati Reali" if p["mode"] == 1 else "Mode 2 — Sintetica"
 
@@ -273,6 +269,35 @@ def render_riepilogo(p: dict) -> str:
     total_sw_est = p["duration_days"] * p["swaps_per_day"] if p["mode"] == 2 else "—"
     exp_atk_est  = int(p["duration_days"] * p["patt_override"] * p["swaps_per_day"]) if p["mode"] == 2 else "—"
 
+    # Fraud example numbers (hypothetical 100 swaps)
+    ex_sw   = 100
+    ex_atk  = round(ex_sw * patt_ex)
+    ex_fr   = round(ex_atk * _fcp)
+    ex_tot  = ex_atk + ex_fr
+    ex_caught  = round(ex_fr * (1.0 - _e))
+    ex_escaped = ex_fr - ex_caught
+
+    # Data source declaration
+    if p["mode"] == 1:
+        ds_block = (
+            "**Fonti dati — Mode 1:**\n"
+            "- Swap: hash e pool reali da Infura (`eth_getLogs`)\n"
+            "- Valore swap in ETH: stimato sinteticamente (log-normale, media ~0.5 ETH) — "
+            "`eth_getLogs` non contiene il valore, solo l'evento\n"
+            "- Patt: calcolato da sandwich/swap reali scaricati da Infura\n"
+            "- **Vbase**: conteggio swap assicurati reali del giorno D-1 (da Infura)\n"
+            "- **Tint**: n_frodi_intercettate_{D-1} × valore_medio_swap_{D-1} [ETH]"
+        )
+    else:
+        ds_block = (
+            "**Fonti dati — Mode 2:**\n"
+            "- Swap: generati sinteticamente (Poisson con media N/giorno, seed casuale)\n"
+            "- Valore swap: log-normale (media ~0.5 ETH, σ=0.4)\n"
+            "- Patt: override manuale + oscillazione ±30% ogni giorno\n"
+            "- **Vbase**: conteggio swap sintetici assicurati del giorno D-1\n"
+            "- **Tint**: n_frodi_intercettate_{D-1} × valore_medio_swap_{D-1} [ETH]"
+        )
+
     return (
         f"## 📋 Riepilogo Simulazione\n\n"
         f"**Modalità:** {mode_str} | **Durata:** {p['duration_days']} giorni | "
@@ -280,22 +305,33 @@ def render_riepilogo(p: dict) -> str:
         "---\n\n"
         "### Formula Premio\n\n"
         "```\nP = V × [(Patt × L%) + (Tint × E/(1−E)) / (Vbase × 1000)] × (1 + M) × Fcov\n```\n\n"
-        f"| Parametro | Valore |\n|---|---|\n"
-        f"| Patt | {patt_ex:.2%} |\n"
-        f"| L% | {p['loss_pct']:.2%} |\n"
-        f"| Term1 = Patt × L% | {term1:.6f} |\n"
-        f"| Tint (USD) | {_tint:.0f} |\n"
-        f"| E (FNR) | {_e:.3f} → E/(1−E) = {_e_safe/(1-_e_safe):.4f} |\n"
-        f"| Vbase (swap) | {_vbase:.0f} |\n"
-        f"| Term2 | {term2:.6f} |\n"
-        f"| Mbase | {p['mbase']:.2%} |\n"
-        f"| M_adj | 0.00/0.05/0.10 in base al SR |\n"
-        f"| Fcov | {_fcov:.2f} |\n\n"
-        f"**Esempio** — 1 ETH, stato sano: P = {prem_ex:.5f} ETH ({pct_val:.3f}%)\n\n"
+        f"| Parametro | Valore | Fonte |\n|---|---|---|\n"
+        f"| Patt | {patt_ex:.2%} | {patt_src} |\n"
+        f"| L% | {p['loss_pct']:.2%} | configurabile |\n"
+        f"| E (FNR) | {_e:.3f} → E/(1−E) = {_e_safe/(1-_e_safe):.4f} | configurabile |\n"
+        f"| **Vbase** | calcolato automaticamente | swap assicurati giorno D-1 |\n"
+        f"| **Tint** | calcolato automaticamente | frodi_caught_{'{D-1}'} × avg_swap_value |\n"
+        f"| Mbase | {p['mbase']:.2%} | configurabile |\n"
+        f"| M_adj | 0.00/0.05/0.10 in base al SR | dinamico |\n"
+        f"| Fcov | {_fcov:.2f} | copertura {p['coverage_label']} |\n\n"
         "---\n\n"
-        f"- **Patt:** {patt_src}\n"
-        f"- **Rottura pool:** solo se `balance_eth < 0` (SR = solo modulatore margine)\n"
-        f"- **Claim:** tutti auto-approvati → payout = loss × Fcov_rimborso\n\n"
+        f"{ds_block}\n\n"
+        "---\n\n"
+        f"### Logica Frodi (fraud_claim_pct = {_fcp:.0%})\n\n"
+        f"Esempio con {ex_sw} swap totali, Patt={patt_ex:.0%}, FNR={_e:.0%}:\n\n"
+        f"```\n"
+        f"Swap totali:          {ex_sw}\n"
+        f"Attacchi reali:       {ex_sw} × {patt_ex:.0%} = {ex_atk}\n"
+        f"Frodi aggiuntive:     {ex_atk} × {_fcp:.0%} = {ex_fr}   ← fraud_claim_pct applicato\n"
+        f"Claim totali:         {ex_tot}\n"
+        f"Frodi intercettate:   {ex_fr} × {1-_e:.0%} = {ex_caught}  ← (1 - FNR)\n"
+        f"Frodi scappate:       {ex_fr} × {_e:.0%} = {ex_escaped}   ← FNR\n"
+        f"Payout reali:         {ex_atk}\n"
+        f"Payout fraudolenti:   {ex_escaped}\n"
+        f"Tint (giorno succ.):  {ex_caught} × avg_swap_value ETH\n"
+        f"```\n\n"
+        "---\n\n"
+        f"- **Rottura pool:** solo se `balance_eth < 0` (SR = solo modulatore margine)\n\n"
         f"~**{total_sw_est}** swap | ~**{exp_atk_est}** attacchi attesi\n"
     )
 
@@ -565,50 +601,98 @@ with tab_sim:
             # ---- Formula breakdown for selected day ----
             with st.expander("📐 Formula Premio — Calcolo del Giorno", expanded=False):
                 _patt_d  = float(row.get("patt_current", 0.0))
-                _tint_d  = float(row.get("tint_today", tint))
-                _vbase_d = float(row.get("vbase_today", vbase))
+                _tint_d  = float(row.get("tint_today", 0.0))
+                _vbase_d = float(row.get("vbase_today", 100.0))
                 _e_d     = float(row.get("e_today", e_fnr))
                 _e_safe  = max(min(_e_d, 0.9999), 0.0001)
                 _e_ratio = _e_safe / (1.0 - _e_safe)
                 _madj_d  = float(row.get("madj_current", 0.0))
                 _mtot_d  = float(row.get("m_total_current", mbase))
                 _term1   = _patt_d * loss_pct
-                _term2   = (_tint_d * _e_ratio) / (_vbase_d * 1000.0)
+                _term2   = (_tint_d * _e_ratio) / (max(_vbase_d, 1.0) * 1000.0)
                 _sum_t   = _term1 + _term2
                 _fcov_d  = fcov
                 _ex_prem = 1.0 * _sum_t * (1.0 + _mtot_d) * _fcov_d
+                _n_fc_d  = int(row.get("n_fraud_caught", 0))
+                _avg_sv  = float(row.get("avg_swap_value_eth", 0.0))
+                _n_fe_d  = int(row.get("n_fraud_escaped", 0))
+
+                _mode_lbl = last_mode
+                _vbase_src = (
+                    f"swap assicurati ieri — Mode 1: da Infura"
+                    if _mode_lbl == 1 else
+                    f"swap sintetici assicurati ieri"
+                )
+                _tint_src = f"{_n_fc_d} frodi intercettate × {_avg_sv:.4f} ETH/swap"
 
                 st.code(
+                    f"Vbase = {_vbase_d:.0f} swap  ({_vbase_src})\n"
+                    f"Tint  = {_tint_d:.4f} ETH  ({_tint_src})\n"
+                    f"\n"
                     f"Patt          = {_patt_d:.5f}\n"
                     f"L%            = {loss_pct:.3f}\n"
-                    f"Term1         = Patt × L%                          = {_term1:.6f}\n"
+                    f"Term1         = Patt × L%                           = {_term1:.6f}\n"
                     f"\n"
-                    f"Tint (USD)    = {_tint_d:.0f}\n"
-                    f"E (FNR)       = {_e_d:.3f}  →  E/(1−E)            = {_e_ratio:.4f}\n"
+                    f"Tint (ETH)    = {_tint_d:.4f}\n"
+                    f"E (FNR)       = {_e_d:.3f}  →  E/(1−E)             = {_e_ratio:.4f}\n"
                     f"Vbase         = {_vbase_d:.0f} swap\n"
-                    f"Term2         = (Tint × E/(1−E)) / (Vbase × 1000)  = {_term2:.6f}\n"
+                    f"Term2         = (Tint × E/(1−E)) / (Vbase × 1000)   = {_term2:.6f}\n"
                     f"\n"
                     f"──────────────────────────────────────────────────────────────\n"
-                    f"Sum           = Term1 + Term2                       = {_sum_t:.6f}\n"
+                    f"Sum           = Term1 + Term2                        = {_sum_t:.6f}\n"
                     f"Mbase         = {mbase:.3f}\n"
                     f"M_adj         = {_madj_d:.4f}\n"
-                    f"M_tot         = Mbase + M_adj                       = {_mtot_d:.4f}\n"
+                    f"M_tot         = Mbase + M_adj                        = {_mtot_d:.4f}\n"
                     f"Fcov          = {_fcov_d:.2f}  ({coverage_label})\n"
                     f"──────────────────────────────────────────────────────────────\n"
                     f"Esempio 1 ETH: P = 1 × {_sum_t:.6f} × (1 + {_mtot_d:.4f}) × {_fcov_d:.2f}\n"
-                    f"             = {_ex_prem:.6f} ETH",
+                    f"             = {_ex_prem:.6f} ETH\n"
+                    f"\n"
+                    f"Frodi oggi:   {int(row.get('n_fraud_attempts',0))} tentativi "
+                    f"| {_n_fc_d} intercettate | {_n_fe_d} scappate",
                     language=None,
                 )
 
             if first_collector:
                 day_swaps = first_collector.daily_swap_details.get(selected_day, [])
-                with st.expander(f"Swap del giorno {selected_day} ({len(day_swaps)})", expanded=False):
+                _n_real   = sum(1 for d in day_swaps if d.get("tipo_claim") == "reale")
+                _n_fi     = sum(1 for d in day_swaps if d.get("tipo_claim") == "frode_intercettata")
+                _n_fs     = sum(1 for d in day_swaps if d.get("tipo_claim") == "frode_scappata")
+                with st.expander(
+                    f"Swap del giorno {selected_day} "
+                    f"({len(day_swaps)} righe: {_n_real} reali, {_n_fi} frodi_catch, {_n_fs} frodi_esc)",
+                    expanded=False,
+                ):
                     if day_swaps:
                         sw_df = pd.DataFrame(day_swaps)
-                        for cn in ("value_ETH","premium_paid","payout_ETH"):
-                            if cn in sw_df.columns:
-                                sw_df[cn] = sw_df[cn].round(6)
-                        st.dataframe(sw_df, use_container_width=True)
+                        # Rename columns for display
+                        col_rename = {
+                            "swap_id":      "Swap ID",
+                            "value_ETH":    "Valore (ETH)",
+                            "was_attacked": "Attaccato",
+                            "coverage_level": "Copertura",
+                            "premium_paid": "Premio (ETH)",
+                            "premium_pct":  "Premio (%)",
+                            "claim_submitted": "Claim?",
+                            "claim_approved":  "Approvato?",
+                            "payout_ETH":   "Rimborso (ETH)",
+                            "rimborso_pct": "Rimborso (%)",
+                            "tipo_claim":   "Tipo Claim",
+                        }
+                        sw_disp = sw_df[[c for c in col_rename if c in sw_df.columns]].rename(columns=col_rename)
+                        for cn in ("Valore (ETH)", "Premio (ETH)", "Rimborso (ETH)"):
+                            if cn in sw_disp.columns:
+                                sw_disp[cn] = sw_disp[cn].round(6)
+                        for cn in ("Premio (%)", "Rimborso (%)"):
+                            if cn in sw_disp.columns:
+                                sw_disp[cn] = sw_disp[cn].round(4)
+                        st.dataframe(sw_disp, use_container_width=True)
+                        st.caption(
+                            "💡 Tipo Claim: **reale** = attacco reale | "
+                            "**frode_intercettata** = frode bloccata (no payout) | "
+                            "**frode_scappata** = frode non rilevata (payout erogato) | "
+                            "**nessuno** = swap non attaccato"
+                        )
                     else:
                         st.info("Nessun dettaglio swap per questo giorno.")
 
@@ -636,9 +720,10 @@ with tab_sim:
                 ("Mbase", f"{_p['mbase']:.2%}"), ("L%", f"{_p['loss_pct']:.2%}"),
                 ("Soglia SR Alta", _p["sr_threshold_high"]), ("Soglia SR Media", _p["sr_threshold_med"]),
                 ("Pool iniziale (ETH)", _p["initial_pool_balance"]),
-                ("Tint (USD)", _p["tint"]),
-                ("Vbase (swap)", _p["vbase"]),
                 ("E (FNR)", f"{_p['e_fnr']:.3f}"),
+                ("Frodi/claim (%)", f"{_p['fraud_claim_pct']:.1%}"),
+                ("Vbase", "auto — swap assicurati D-1"),
+                ("Tint", "auto — frodi_caught_{D-1} × avg_swap_value"),
             ]
             if _p["mode"] == 2:
                 rows += [
@@ -663,27 +748,36 @@ with tab_sim:
         with st.expander("📐 Formula per giorno", expanded=False):
             _fcov_v = _COVERAGE_FCOV[coverage_label]
             rows_f  = []
+            _mode_l = last_mode
             for _, fr in first_df.iterrows():
                 patt_d   = float(fr.get("patt_current", 0.05))
                 madj_d   = float(fr.get("madj_current", 0.0))
                 m_tot    = mbase + madj_d
-                tint_d   = float(fr.get("tint_today", tint))
-                vbase_d  = float(fr.get("vbase_today", vbase))
+                tint_d   = float(fr.get("tint_today", 0.0))
+                vbase_d  = float(fr.get("vbase_today", 100.0))
                 e_d      = float(fr.get("e_today", e_fnr))
                 e_safe   = max(min(e_d, 0.9999), 0.0001)
                 t1       = patt_d * loss_pct
-                t2       = (tint_d * (e_safe / (1.0 - e_safe))) / (vbase_d * 1000.0)
+                t2       = (tint_d * (e_safe / (1.0 - e_safe))) / (max(vbase_d, 1.0) * 1000.0)
                 prem_ex  = (t1 + t2) * (1 + m_tot) * _fcov_v
+                n_fc     = int(fr.get("n_fraud_caught", 0))
+                n_fe     = int(fr.get("n_fraud_escaped", 0))
+                avg_sv   = float(fr.get("avg_swap_value_eth", 0.0))
+                _vb_src  = "Infura D-1" if _mode_l == 1 else "sintetico D-1"
                 rows_f.append({
-                    "Giorno": int(fr["day"]),
-                    "Patt": f"{patt_d:.3%}",
-                    "L%": f"{loss_pct:.2%}",
-                    "Term1": f"{t1:.6f}",
-                    "Term2": f"{t2:.6f}",
-                    "M_tot": f"{m_tot:.3f}",
-                    "Fcov": f"{_fcov_v:.2f}",
+                    "Giorno":     int(fr["day"]),
+                    "Patt":       f"{patt_d:.3%}",
+                    "L%":         f"{loss_pct:.2%}",
+                    "Vbase":      f"{vbase_d:.0f} ({_vb_src})",
+                    "Tint (ETH)": f"{tint_d:.4f} ({n_fc}×{avg_sv:.3f})",
+                    "Term1":      f"{t1:.6f}",
+                    "Term2":      f"{t2:.6f}",
+                    "M_tot":      f"{m_tot:.3f}",
+                    "Fcov":       f"{_fcov_v:.2f}",
                     "P/V (1 ETH)": f"{prem_ex:.5f}",
-                    "SR": f"{float(fr.get('solvency_ratio',0)):.4f}",
+                    "SR":         f"{float(fr.get('solvency_ratio',0)):.4f}",
+                    "Frodi catch": n_fc,
+                    "Frodi esc":   n_fe,
                 })
             st.dataframe(pd.DataFrame(rows_f), use_container_width=True, hide_index=True, height=300)
             fonte("P = V × [(Patt × L%) + (Tint × E/(1−E)) / (Vbase × 1000)] × (1+M) × Fcov")
@@ -842,6 +936,48 @@ with tab_infura:
         st.info("Nessun database locale. Configura la chiave Infura e scarica i dati.")
 
     st.markdown("---")
+    st.markdown("### 📅 Dettaglio Blocchi Scaricati")
+
+    if _dbe2:
+        try:
+            _bc2 = sqlite3.connect(_DB_PATH, check_same_thread=False)
+            # Blocchi con data, ora e numero swap
+            _block_rows = _bc2.execute(
+                "SELECT block_number, timestamp, COUNT(*) as n_swaps "
+                "FROM swaps GROUP BY block_number ORDER BY block_number"
+            ).fetchall()
+            _bc2.close()
+            if _block_rows:
+                import datetime as _dt
+                _br_data = []
+                for bn, ts, ns in _block_rows:
+                    try:
+                        _dt_obj = _dt.datetime.fromtimestamp(ts, _dt.timezone.utc)
+                        _date_s = _dt_obj.strftime("%d/%m/%Y")
+                        _time_s = _dt_obj.strftime("%H:%M:%S")
+                    except Exception:
+                        _date_s, _time_s = "—", "—"
+                    _br_data.append({
+                        "Blocco #":   bn,
+                        "Data (UTC)": _date_s,
+                        "Ora (UTC)":  _time_s,
+                        "Swap":       ns,
+                    })
+                _br_df = pd.DataFrame(_br_data)
+                st.dataframe(_br_df, use_container_width=True, hide_index=True, height=250)
+                st.caption(
+                    f"Periodo: blocco #{_br_data[0]['Blocco #']:,} ({_br_data[0]['Data (UTC)']} {_br_data[0]['Ora (UTC)']}) "
+                    f"→ #{_br_data[-1]['Blocco #']:,} ({_br_data[-1]['Data (UTC)']} {_br_data[-1]['Ora (UTC)']})"
+                    f" | {len(_br_data)} blocchi con swap"
+                )
+            else:
+                st.info("Nessun dato di blocco disponibile.")
+        except Exception as _bex:
+            st.warning(f"Blocchi non disponibili: {_bex}")
+    else:
+        st.info("Scarica i dati per vedere il dettaglio dei blocchi.")
+
+    st.markdown("---")
     st.markdown("### Come Funziona il Fetch")
     st.markdown("""
 | | Vecchio | Nuovo |
@@ -851,7 +987,8 @@ with tab_infura:
 | Tempo | ~94 ore | < 60 s |
 
 **Rilevamento sandwich:** tripla (frontrun, victim, backrun) stesso pool, blocchi consecutivi,
-verificata con `eth_getTransactionByHash` (frontrun.from == backrun.from ≠ victim.from).
+stessa pool address, tutti e tre i tx_hash diversi — solo dati `eth_getLogs`, nessuna chiamata
+`eth_getTransactionByHash`. Più veloce e meno costoso in termini di chiamate API.
 """)
 
 
@@ -899,9 +1036,18 @@ P = V × [(Patt × L%) + (Tint × E/(1−E)) / (Vbase × 1000)] × (1 + M) × Fc
 - `Patt × L%` = probabilità attacco × perdita media
 
 **Termine 2** — costo del rischio da falsi negativi:
-- `Tint` = valore MEV intercettato 24h (USD) — configurabile in sidebar
-- `E` = False Negative Rate — attacchi non rilevati — configurabile in sidebar
-- `Vbase` = swap assicurati 24h (normalizzazione) — configurabile in sidebar
+- `Tint` = frodi intercettate (D-1) × valore medio swap [ETH] — **calcolato automaticamente**
+- `E` = False Negative Rate — configurabile in sidebar
+- `Vbase` = swap assicurati giorno D-1 — **calcolato automaticamente** dal simulatore
+
+**Aggiornamento giornaliero:**
+- `Vbase` = numero di swap assicurati del giorno precedente (Mode 1: dati Infura, Mode 2: sintetici)
+- `Tint` = n_frodi_intercettate_{D-1} × avg_swap_value_{D-1} in ETH
+
+**Logica frodi:**
+- `n_fraud_attempts` = n_real_attacks × fraud_claim_pct
+- `n_fraud_caught` = n_fraud_attempts × (1 − E)  → nessun payout, contribuisce a Tint
+- `n_fraud_escaped` = n_fraud_attempts × E         → payout erogato (frode non rilevata)
 
 **Margine dinamico:**
 - `M = Mbase + M_adj`
@@ -928,9 +1074,13 @@ P = V × [(Patt × L%) + (Tint × E/(1−E)) / (Vbase × 1000)] × (1 + M) × Fc
 
 1. Raccoglie eventi `Swap` da Uniswap/Sushiswap/Curve via `eth_getLogs` (CHUNK_SIZE=500)
 2. Ordina per blocco, indice transazione, indice log
-3. Cerca triple consecutive (frontrun, victim, backrun) nello stesso pool e blocchi adiacenti
-4. **Verifica** via `eth_getTransactionByHash`:
-   - `frontrun.from == backrun.from` (stesso attaccante)
-   - `frontrun.from != victim.from` (attaccante ≠ vittima)
-5. Calcola `Patt = (n_sandwich / n_swap) × (1 + ms)` con margine di sicurezza ms
+3. Cerca triple consecutive (frontrun, victim, backrun) che soddisfano **tutti** i criteri:
+   - Stessa pool address
+   - Blocchi consecutivi (max distanza 1)
+   - Tutti e tre i tx_hash diversi tra loro
+4. Calcola `Patt = (n_sandwich / n_swap) × (1 + ms)` con margine di sicurezza ms
+
+> **Nota:** il rilevamento usa esclusivamente i dati già disponibili nei log (`eth_getLogs`),
+> senza chiamate aggiuntive `eth_getTransactionByHash`. Questo rende il fetch molto più veloce
+> e riduce le chiamate Infura al minimo.
 """)
