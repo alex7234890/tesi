@@ -1,12 +1,15 @@
 """
 Premium formula:
 
-  P = V × (Patt × L%) × (1 + M) × Fcov
+  P = V × [(Patt × L%) + (Tint × E/(1−E)) / (Vbase × 1000)] × (1 + M) × Fcov
 
 Where:
   V    — swap value in ETH
   Patt — sandwich attack probability (real or simulated)
   L%   — average loss percentage
+  Tint — total MEV intercepted in last 24h (USD)
+  E    — False Negative Rate  →  E/(1−E) multiplier
+  Vbase — number of insured swaps in last 24h
   M    — Mbase + Madj
   Fcov — 0.70 (low) | 0.90 (medium) | 1.00 (high)
 """
@@ -21,7 +24,14 @@ def compute_premium(
     loss_pct: float,
     m_total: float,
     coverage: str,
+    tint: float = 8000.0,
+    e: float = 0.20,
+    vbase: float = 100.0,
 ) -> float:
-    fcov    = _FCOV.get(coverage.lower(), 1.00)
-    premium = value_eth * (patt * loss_pct) * (1.0 + m_total) * fcov
+    """P = V × [(Patt × L%) + (Tint × E/(1−E)) / (Vbase × 1000)] × (1+M) × Fcov"""
+    fcov   = _FCOV.get(coverage.lower(), 1.00)
+    term1  = patt * loss_pct
+    e_safe = max(min(e, 0.9999), 0.0001)
+    term2  = (tint * (e_safe / (1.0 - e_safe))) / (vbase * 1000.0)
+    premium = value_eth * (term1 + term2) * (1.0 + m_total) * fcov
     return max(premium, 0.0)

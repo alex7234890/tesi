@@ -1,8 +1,8 @@
 {
-  "total_profit_eth": 4176.886645047395,
-  "final_balance_eth": 4276.8866450473,
-  "final_solvency_ratio": 3.358346655785073,
-  "claim_approval_rate": 0.8717131103804923,
-  "pool_survived": false,
-  "total_days": 180
+  "total_profit_eth": 127119.03684918057,
+  "final_balance_eth": 127219.03684917798,
+  "final_solvency_ratio": 55.78780484084757,
+  "pool_survived": true,
+  "total_days": 180,
+  "breakdown_event": null
 }

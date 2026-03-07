@@ -17,9 +17,8 @@ class InsurancePool:
         self._sr_th             = pool_cfg["solvency_thresholds"]
         self._madj_v            = pool_cfg["madj"]
 
-        self.total_premiums_eth: float      = 0.0
-        self.total_payouts_eth: float       = 0.0
-        self.total_oracle_rewards_eth: float = 0.0
+        self.total_premiums_eth: float = 0.0
+        self.total_payouts_eth: float  = 0.0
 
         # Rolling 8-slot window (7 + current day)
         self._daily_payouts: deque  = deque(maxlen=8)
@@ -38,10 +37,6 @@ class InsurancePool:
         self.balance_eth -= amount
         self.total_payouts_eth += amount
         self._today_payout += amount
-
-    def add_oracle_reward(self, amount: float) -> None:
-        self.balance_eth -= amount
-        self.total_oracle_rewards_eth += amount
 
     def register_policy(self) -> None:
         self._today_policies += 1
@@ -99,11 +94,7 @@ class InsurancePool:
 
     @property
     def profit_eth(self) -> float:
-        return (
-            self.total_premiums_eth
-            - self.total_payouts_eth
-            - self.total_oracle_rewards_eth
-        )
+        return self.total_premiums_eth - self.total_payouts_eth
 
     @property
     def survived(self) -> bool:

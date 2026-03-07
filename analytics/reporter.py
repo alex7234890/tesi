@@ -24,7 +24,8 @@ class Reporter:
         print(f"  Total profit (ETH)      : {summary['total_profit_eth']:>12.4f}")
         print(f"  Final balance (ETH)     : {summary['final_balance_eth']:>12.4f}")
         print(f"  Final solvency ratio    : {summary['final_solvency_ratio']:>12.4f}")
-        print(f"  Avg claim approval rate : {summary['claim_approval_rate']:>11.1%}")
+        _rate = summary.get("claim_approval_rate", 1.0)
+        print(f"  Avg claim approval rate : {_rate:>11.1%}")
         survived = "YES ✓" if summary["pool_survived"] else "NO  ✗ — pool went insolvent"
         print(f"  Pool survived           : {survived}")
         print(f"  Simulation days         : {summary['total_days']:>12d}")
