@@ -33,9 +33,13 @@ class MetricsCollector:
         payouts_today: float = 0.0,
         pending_liabilities_eth: float = 0.0,
         swap_details: Optional[List[Dict[str, Any]]] = None,
-        tint: float = 8000.0,
+        tint: float = 0.0,
         e: float = 0.20,
         vbase: float = 100.0,
+        n_fraud_attempts: int = 0,
+        n_fraud_caught: int = 0,
+        n_fraud_escaped: int = 0,
+        avg_swap_value_eth: float = 0.0,
     ) -> None:
         n_claims   = len(claims)
         n_approved = n_claims  # all claims are approved
@@ -87,10 +91,16 @@ class MetricsCollector:
             ),
 
             # Premium formula parameters (for Day-by-Day breakdown)
-            "tint_today":  tint,
-            "vbase_today": vbase,
-            "e_today":     e,
-            "term2_today": term2,
+            "tint_today":         tint,
+            "vbase_today":        vbase,
+            "e_today":            e,
+            "term2_today":        term2,
+
+            # Fraud tracking
+            "n_fraud_attempts":   n_fraud_attempts,
+            "n_fraud_caught":     n_fraud_caught,
+            "n_fraud_escaped":    n_fraud_escaped,
+            "avg_swap_value_eth": avg_swap_value_eth,
         }
 
         # User metrics (mode 2 only)

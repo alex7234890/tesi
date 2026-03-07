@@ -57,6 +57,9 @@ _OUT_DIR = os.path.join(_HERE, "data")
 # Simulation engine
 # =========================================================================
 
+_FCOV_PAYOUT = {"low": 0.50, "medium": 0.70, "high": 1.00}
+
+
 def run_single(
     config: dict,
     mode: int,
@@ -97,9 +100,9 @@ def run_single(
     # -----------------------------------------------------------------
     # Premium formula parameters (from config)
     # -----------------------------------------------------------------
-    tint_cfg  = float(config.get("market", {}).get("tint",  8000.0))
-    e_cfg     = float(config.get("market", {}).get("e",     0.20))
-    vbase_cfg = float(config.get("market", {}).get("vbase", 100.0))
+    e_cfg          = float(config.get("market", {}).get("e", 0.20))
+    fraud_claim_pct = float(config.get("simulation", {}).get("fraud_claim_pct", 0.05))
+    fcov_payout    = _FCOV_PAYOUT.get(coverage.lower(), 1.00)
 
     # -----------------------------------------------------------------
     # Rolling state across days
@@ -110,6 +113,10 @@ def run_single(
     # Cumulative totals from previous day (for daily delta computation)
     prev_total_premiums: float = 0.0
     prev_total_payouts:  float = 0.0
+
+    # Dynamic tint/vbase: computed from D-1 (start with defaults for day 0)
+    vbase_prev: float = 100.0   # insured swaps from previous day
+    tint_prev:  float = 0.0     # n_fraud_caught * avg_swap_value from previous day
 
     # Breakdown tracking
     breakdown_event: dict | None = None
@@ -129,8 +136,17 @@ def run_single(
         m_total = pool.get_m_total()
         l_pct   = config["market"]["loss_pct_mean"]
 
+        # Dynamic tint/vbase from previous day
+        tint_today  = tint_prev
+        vbase_today = vbase_prev
+
         today_claims       = []
         today_swap_details = []
+
+        # Per-day swap value stats
+        avg_swap_value_eth = (
+            sum(s.value_eth for s in swaps) / max(len(swaps), 1)
+        )
 
         for swap in swaps:
             # ---- Premium for this insured swap ----
@@ -140,12 +156,15 @@ def run_single(
                 loss_pct=l_pct,
                 m_total=m_total,
                 coverage=swap.coverage,
-                tint=tint_cfg,
+                tint=tint_today,
                 e=e_cfg,
-                vbase=vbase_cfg,
+                vbase=vbase_today,
             )
             pool.add_premium(premium)
             pool.register_policy()
+
+            # Premium percentage of swap value
+            premium_pct = (premium / swap.value_eth * 100.0) if swap.value_eth > 0 else 0.0
 
             # Start building swap detail record
             swap_detail: dict = {
@@ -155,9 +174,12 @@ def run_single(
                 "insured":         True,
                 "coverage_level":  swap.coverage,
                 "premium_paid":    premium,
+                "premium_pct":     round(premium_pct, 4),
                 "claim_submitted": False,
                 "claim_approved":  False,
                 "payout_ETH":      0.0,
+                "rimborso_pct":    0.0,
+                "tipo_claim":      "nessuno",
             }
 
             # ---- Claim if attacked ----
@@ -169,9 +191,12 @@ def run_single(
                 pool.resolve_pending_claim(swap.loss_eth)
                 today_claims.append(claim)
 
+                rimborso_pct = (claim.payout_eth / swap.value_eth * 100.0) if swap.value_eth > 0 else 0.0
                 swap_detail["claim_submitted"] = True
                 swap_detail["claim_approved"]  = True
                 swap_detail["payout_ETH"]      = claim.payout_eth
+                swap_detail["rimborso_pct"]    = round(rimborso_pct, 4)
+                swap_detail["tipo_claim"]      = "reale"
 
                 pool.add_payout(claim.payout_eth)
                 if user:
@@ -182,6 +207,56 @@ def run_single(
                 )
 
             today_swap_details.append(swap_detail)
+
+        # ---- Fraud claim logic (aggregate, on top of real attacks) ----
+        n_real_attacks   = sum(1 for s in swaps if s.is_attacked)
+        n_fraud_attempts = round(n_real_attacks * fraud_claim_pct)
+        n_fraud_caught   = round(n_fraud_attempts * (1.0 - e_cfg))
+        n_fraud_escaped  = n_fraud_attempts - n_fraud_caught
+
+        # Payout for escaped fraud claims
+        avg_loss_eth = l_pct * avg_swap_value_eth
+        fraud_payout = n_fraud_escaped * avg_loss_eth * fcov_payout
+        if fraud_payout > 0:
+            pool.add_payout(fraud_payout)
+
+        # Add synthetic rows for fraud claims in swap details table
+        for _ in range(n_fraud_caught):
+            today_swap_details.append({
+                "swap_id":         f"fraud_caught_day{day}",
+                "value_ETH":       avg_swap_value_eth,
+                "was_attacked":    False,
+                "insured":         True,
+                "coverage_level":  coverage,
+                "premium_paid":    0.0,
+                "premium_pct":     0.0,
+                "claim_submitted": True,
+                "claim_approved":  False,
+                "payout_ETH":      0.0,
+                "rimborso_pct":    0.0,
+                "tipo_claim":      "frode_intercettata",
+            })
+        for _ in range(n_fraud_escaped):
+            payout_fr = avg_loss_eth * fcov_payout
+            today_swap_details.append({
+                "swap_id":         f"fraud_escaped_day{day}",
+                "value_ETH":       avg_swap_value_eth,
+                "was_attacked":    False,
+                "insured":         True,
+                "coverage_level":  coverage,
+                "premium_paid":    0.0,
+                "premium_pct":     0.0,
+                "claim_submitted": True,
+                "claim_approved":  True,
+                "payout_ETH":      payout_fr,
+                "rimborso_pct":    round(payout_fr / avg_swap_value_eth * 100.0, 4) if avg_swap_value_eth > 0 else 0.0,
+                "tipo_claim":      "frode_scappata",
+            })
+
+        logger.debug(
+            f"Day {day}: fraud_attempts={n_fraud_attempts} caught={n_fraud_caught} "
+            f"escaped={n_fraud_escaped} payout={fraud_payout:.4f} ETH"
+        )
 
         # ---- End-of-day accounting ----
         pool.end_of_day()
@@ -201,6 +276,11 @@ def run_single(
         prev_total_premiums = pool.total_premiums_eth
         prev_total_payouts  = pool.total_payouts_eth
 
+        # ---- Update dynamic tint/vbase for next day ----
+        # tint_next = frodi intercettate oggi × valore medio swap
+        tint_prev  = n_fraud_caught * avg_swap_value_eth
+        vbase_prev = float(len(swaps))
+
         # ---- Collect metrics ----
         collector.collect(
             day=day,
@@ -214,9 +294,13 @@ def run_single(
             payouts_today=payouts_today,
             pending_liabilities_eth=pool.pending_liabilities_eth,
             swap_details=today_swap_details,
-            tint=tint_cfg,
+            tint=tint_today,
             e=e_cfg,
-            vbase=vbase_cfg,
+            vbase=vbase_today,
+            n_fraud_attempts=n_fraud_attempts,
+            n_fraud_caught=n_fraud_caught,
+            n_fraud_escaped=n_fraud_escaped,
+            avg_swap_value_eth=avg_swap_value_eth,
         )
 
     logger.info("Simulation complete.")
