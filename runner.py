@@ -60,6 +60,16 @@ _OUT_DIR = os.path.join(_HERE, "data")
 _FCOV_PAYOUT = {"low": 0.50, "medium": 0.70, "high": 1.00}
 
 
+def _n_oracles_for_claim(swap_value_eth: float) -> int:
+    """Numero di oracle per claim in base al valore dello swap (PDF spec)."""
+    if swap_value_eth < 1.0:
+        return 3
+    elif swap_value_eth < 5.0:
+        return 5
+    else:
+        return 7
+
+
 def run_single(
     config: dict,
     mode: int,
@@ -100,9 +110,10 @@ def run_single(
     # -----------------------------------------------------------------
     # Premium formula parameters (from config)
     # -----------------------------------------------------------------
-    e_cfg          = float(config.get("market", {}).get("e", 0.20))
+    e_cfg           = float(config.get("market", {}).get("e", 0.20))
     fraud_claim_pct = float(config.get("simulation", {}).get("fraud_claim_pct", 0.05))
-    fcov_payout    = _FCOV_PAYOUT.get(coverage.lower(), 1.00)
+    fcov_payout     = _FCOV_PAYOUT.get(coverage.lower(), 1.00)
+    oracle_reward   = float(config.get("oracles", {}).get("reward_patt_update_eth", 0.002))
 
     # -----------------------------------------------------------------
     # Rolling state across days
@@ -117,6 +128,9 @@ def run_single(
     # Dynamic tint/vbase: computed from D-1 (start with defaults for day 0)
     vbase_prev: float = 100.0   # insured swaps from previous day
     tint_prev:  float = 0.0     # n_fraud_caught * avg_swap_value from previous day
+
+    # Oracle cost tracking
+    total_oracle_cost_eth: float = 0.0
 
     # Breakdown tracking
     breakdown_event: dict | None = None
@@ -144,11 +158,13 @@ def run_single(
         today_swap_details = []
 
         # Per-day counters (reset each day)
-        n_real_attacks     = 0
-        n_fraud_caught     = 0
-        n_fraud_escaped    = 0
-        payout_real_today  = 0.0
-        payout_fraud_today = 0.0
+        n_real_attacks      = 0
+        n_fraud_caught      = 0
+        n_fraud_escaped     = 0
+        payout_real_today   = 0.0
+        payout_fraud_today  = 0.0
+        oracle_cost_today   = 0.0
+        n_oracles_used_today= 0
 
         # Average swap value for tint computation
         avg_swap_value_eth = sum(s.value_eth for s in swaps) / max(len(swaps), 1)
@@ -185,6 +201,15 @@ def run_single(
             claim_submitted = swap.is_attacked or is_fraud_caught or is_fraud_escaped
             claim_approved  = False
             tipo_claim      = "nessuno"
+
+            # Oracle cost — paid for every submitted claim (approved or not)
+            _n_oracles = 0
+            if claim_submitted:
+                _n_oracles = _n_oracles_for_claim(swap.value_eth)
+                _oc_swap   = _n_oracles * oracle_reward
+                oracle_cost_today    += _oc_swap
+                n_oracles_used_today += _n_oracles
+                pool.add_payout(_oc_swap)          # deducted from pool immediately
 
             if swap.is_attacked:
                 tipo_claim    = "reale"
@@ -231,6 +256,8 @@ def run_single(
                 "payout_ETH":      payout_eth,
                 "rimborso_pct":    round(rimborso_pct, 4),
                 "tipo_claim":      tipo_claim,
+                "oracle_cost_eth": round(_n_oracles * oracle_reward, 6),
+                "n_oracles_used":  _n_oracles,
             })
 
         n_fraud_attempts = n_fraud_caught + n_fraud_escaped
@@ -263,6 +290,16 @@ def run_single(
         tint_prev  = n_fraud_caught * avg_swap_value_eth
         vbase_prev = float(len(swaps))
 
+        # ---- Accumulate oracle cost ----
+        total_oracle_cost_eth += oracle_cost_today
+
+        # Compute Term1/Term2 for the day (for metrics)
+        _e_safe_d = max(min(e_cfg, 0.9999), 0.0001)
+        _l_pct_d  = l_pct
+        _term1_d  = patt * _l_pct_d
+        _term2_d  = (tint_today * (_e_safe_d / (1.0 - _e_safe_d))) / (max(vbase_today, 1.0) * 1000.0)
+        _prem_rate_d = (_term1_d + _term2_d) * (1.0 + m_total) * fcov_payout
+
         # ---- Collect metrics ----
         collector.collect(
             day=day,
@@ -286,12 +323,18 @@ def run_single(
             avg_swap_value_eth=avg_swap_value_eth,
             payout_real_today=payout_real_today,
             payout_fraud_today=payout_fraud_today,
+            oracle_cost_today=oracle_cost_today,
+            n_oracles_used_today=n_oracles_used_today,
+            term1_today=_term1_d,
+            term2_today=_term2_d,
+            premium_rate_today=_prem_rate_d,
         )
 
     logger.info("Simulation complete.")
     summary = collector.summary(pool)
-    summary["breakdown_event"] = breakdown_event
-    summary["pool_survived"]   = breakdown_event is None
+    summary["breakdown_event"]      = breakdown_event
+    summary["pool_survived"]        = breakdown_event is None
+    summary["total_oracle_cost_eth"] = round(total_oracle_cost_eth, 6)
     return collector, pool, summary
 
 
