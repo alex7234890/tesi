@@ -57,6 +57,7 @@ class SyntheticDataSource(BaseDataSource):
         uc = config["users"]
         self.initial_count: int       = uc["initial_count"]
         self.growth_rate_daily: float = uc["growth_rate_daily"]
+        self.swaps_per_day: int       = int(uc.get("swaps_per_day", 100))
         self.swap_freq_mean: float    = uc["swap_frequency_mean"]
         self.coverage_dist: dict      = uc["coverage_distribution"]
         self.max_daily_swaps: int     = int(uc.get("max_daily_swaps", 99))
@@ -134,51 +135,56 @@ class SyntheticDataSource(BaseDataSource):
         if day > 0:
             self._grow_users()
 
-        patt   = self.get_patt(day)
-        swaps: List[Swap] = []
+        patt = self.get_patt(day)
 
-        # Reset daily swap counter
+        # Reset daily counters
         for u in self._users.values():
             u.daily_swaps_today = 0
             u.total_days_active += 1
 
-        for uid, user in list(self._users.items()):
-            n_swaps = int(self.rng.poisson(self.swap_freq_mean))
-            n_swaps = min(n_swaps, self.max_daily_swaps)
+        # Pool-level generation: total swaps drawn from Poisson(swaps_per_day)
+        # regardless of how many users exist — fixes the per-user explosion bug.
+        n_swaps = max(1, int(self.rng.poisson(self.swaps_per_day)))
 
-            for i in range(n_swaps):
-                value_eth   = float(np.clip(self.rng.lognormal(np.log(0.5), 0.4), 0.01, 50.0))
-                is_attacked = self.rng.random() < patt
+        user_ids = list(self._users.keys())
+        swaps: List[Swap] = []
 
-                if is_attacked:
-                    loss_pct = float(
-                        np.clip(
-                            self.rng.normal(self.loss_pct_mean, self.loss_pct_std),
-                            0.0,
-                            1.0,
-                        )
-                    )
-                    loss_eth = value_eth * loss_pct
-                else:
-                    loss_eth = 0.0
+        for i in range(n_swaps):
+            uid  = user_ids[int(self.rng.integers(0, len(user_ids)))]
+            user = self._users[uid]
 
-                coverage = self._pick_coverage()
-                tx       = f"0x{uuid.uuid4().hex}"
+            value_eth   = float(np.clip(self.rng.lognormal(np.log(0.5), 0.4), 0.01, 50.0))
+            is_attacked = self.rng.random() < patt
 
-                swaps.append(
-                    Swap(
-                        timestamp=day * 86400 + i,
-                        value_eth=value_eth,
-                        is_attacked=is_attacked,
-                        loss_eth=loss_eth,
-                        coverage=coverage,
-                        user_id=uid,
-                        user_tier=None,
-                        tx_hash=tx,
+            if is_attacked:
+                loss_pct = float(
+                    np.clip(
+                        self.rng.normal(self.loss_pct_mean, self.loss_pct_std),
+                        0.0,
+                        1.0,
                     )
                 )
-                user.total_swaps      += 1
-                user.daily_swaps_today += 1
+                loss_eth = value_eth * loss_pct
+            else:
+                loss_eth = 0.0
+
+            coverage = self._pick_coverage()
+            tx       = f"0x{uuid.uuid4().hex}"
+
+            swaps.append(
+                Swap(
+                    timestamp=day * 86400 + i,
+                    value_eth=value_eth,
+                    is_attacked=is_attacked,
+                    loss_eth=loss_eth,
+                    coverage=coverage,
+                    user_id=uid,
+                    user_tier=None,
+                    tx_hash=tx,
+                )
+            )
+            user.total_swaps       += 1
+            user.daily_swaps_today += 1
 
         return swaps
 

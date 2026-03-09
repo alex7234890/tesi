@@ -23,6 +23,7 @@ users:
   growth_rate_daily: 0.02
   fraud_rate: 0.05
   fraud_strategy: "mixed"
+  swaps_per_day: 100
   swap_frequency_mean: 3
   max_daily_swaps: 10
   coverage_distribution:
