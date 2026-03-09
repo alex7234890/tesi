@@ -43,6 +43,11 @@ class MetricsCollector:
         avg_swap_value_eth: float = 0.0,
         payout_real_today: float = 0.0,
         payout_fraud_today: float = 0.0,
+        oracle_cost_today: float = 0.0,
+        n_oracles_used_today: int = 0,
+        term1_today: float = 0.0,
+        term2_today: float = 0.0,
+        premium_rate_today: float = 0.0,
     ) -> None:
         n_claims   = len(claims)
         n_approved = n_claims  # all claims are approved
@@ -107,6 +112,16 @@ class MetricsCollector:
             "avg_swap_value_eth": avg_swap_value_eth,
             "payout_real_today":  payout_real_today,
             "payout_fraud_today": payout_fraud_today,
+
+            # Oracle
+            "oracle_cost_today":    oracle_cost_today,
+            "n_oracles_used_today": n_oracles_used_today,
+
+            # Formula terms (pre-computed)
+            "term1_today":        term1_today,
+            "term2_today":        term2_today,
+            "premium_rate_today": premium_rate_today,
+            "loss_pct_current":   pool.get_m_total(),  # reuse field (m_total stored separately)
         }
 
         # User metrics (mode 2 only)
@@ -140,11 +155,25 @@ class MetricsCollector:
             days     = np.arange(len(balances), dtype=float)
             slope, _ = np.polyfit(days, balances, 1)
             trend_slope = float(slope)
+
+        avg_prem_rate = float(df["premium_rate_today"].mean()) * 100.0 if "premium_rate_today" in df.columns else 0.0
+        avg_term1     = float(df["term1_today"].mean()) if "term1_today" in df.columns else 0.0
+        avg_term2     = float(df["term2_today"].mean()) if "term2_today" in df.columns else 0.0
+        total_oracle  = float(df["oracle_cost_today"].sum()) if "oracle_cost_today" in df.columns else 0.0
+        total_real_p  = float(df["payout_real_today"].sum()) if "payout_real_today" in df.columns else 0.0
+        total_fraud_p = float(df["payout_fraud_today"].sum()) if "payout_fraud_today" in df.columns else 0.0
+
         return {
-            "total_profit_eth":     pool.profit_eth,
-            "final_balance_eth":    pool.balance_eth,
-            "final_solvency_ratio": pool.solvency_ratio(),
-            "pool_survived":        pool.survived,
-            "total_days":           len(df),
-            "trend_slope":          trend_slope,
+            "total_profit_eth":      pool.profit_eth,
+            "final_balance_eth":     pool.balance_eth,
+            "final_solvency_ratio":  pool.solvency_ratio(),
+            "pool_survived":         pool.survived,
+            "total_days":            len(df),
+            "trend_slope":           trend_slope,
+            "avg_premium_rate_pct":  avg_prem_rate,
+            "avg_term1":             avg_term1,
+            "avg_term2":             avg_term2,
+            "total_oracle_cost_eth": total_oracle,
+            "total_real_payouts_eth":  total_real_p,
+            "total_fraud_payouts_eth": total_fraud_p,
         }
