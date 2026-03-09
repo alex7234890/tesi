@@ -237,7 +237,7 @@ def _build_config(
 
     if mode == 2:
         cfg["users"]["initial_count"]       = int(n_synthetic_users)
-        cfg["users"]["swap_frequency_mean"] = max(1, int(swaps_per_day / max(n_synthetic_users, 1)))
+        cfg["simulation"]["swaps_per_day"]  = int(swaps_per_day)
         cfg["users"]["max_daily_swaps"]     = int(max_daily_swaps)
 
     # Oracle reward

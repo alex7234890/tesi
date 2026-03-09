@@ -170,8 +170,10 @@ def run_single(
         avg_swap_value_eth = sum(s.value_eth for s in swaps) / max(len(swaps), 1)
 
         # Pre-compute fraud assignments: frodi = % degli attacchi reali, NON degli swap totali
+        # Use binomial sampling instead of round() — round(0.5)=0 in Python (banker's rounding)
+        # would suppress all fraud when n_real_attacks is small (e.g. 10 * 5% = 0.5 → 0).
         _n_real_today = sum(1 for s in swaps if s.is_attacked)
-        _n_fraud_total = round(_n_real_today * fraud_claim_pct)
+        _n_fraud_total = int(rng.binomial(_n_real_today, fraud_claim_pct)) if _n_real_today > 0 else 0
         _non_atk_idx = [i for i, s in enumerate(swaps) if not s.is_attacked]
         _n_fraud_total = min(_n_fraud_total, len(_non_atk_idx))
         _fraud_idx: set = set()

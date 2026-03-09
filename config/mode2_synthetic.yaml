@@ -2,6 +2,7 @@
 simulation:
   seed: 42
   duration_days: 180
+  swaps_per_day: 100
 
 market:
   patt_oscillation_range: 0.02
