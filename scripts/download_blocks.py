@@ -15,6 +15,7 @@ import pickle
 import sqlite3
 import sys
 import time
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set
 
@@ -299,6 +300,89 @@ def fetch_dex_events(
     return result
 
 
+def _decode_swap_amounts(log: dict, dex: str):
+    """
+    Decode token amounts directly from Swap log data — no extra RPC calls.
+
+    Uniswap V2 / Sushiswap  (topic: SWAP_TOPIC_V2)
+        event Swap(address indexed sender,
+                   uint256 amount0In, uint256 amount1In,
+                   uint256 amount0Out, uint256 amount1Out,
+                   address indexed to)
+        Non-indexed data: [amount0In | amount1In | amount0Out | amount1Out]
+        4 × uint256 = 128 bytes.
+
+    Uniswap V3  (topic: SWAP_TOPIC_V3)
+        event Swap(address indexed sender, address indexed recipient,
+                   int256 amount0, int256 amount1,
+                   uint160 sqrtPriceX96, uint128 liquidity, int24 tick)
+        Non-indexed data starts with amount0, amount1 (each int256 = 32 bytes).
+        Positive = token flows INTO the pool; negative = token flows OUT.
+
+    Returns (amount_in, amount_out, price, direction) where:
+        price     = amount_in / amount_out   (cost per output unit;
+                    higher means a worse rate for the swapper)
+        direction = "0_to_1" | "1_to_0" | "unknown"
+    """
+    try:
+        raw = log.get("data", b"")
+        if isinstance(raw, (bytes, bytearray)):
+            data = bytes(raw)
+        elif isinstance(raw, str):
+            data = bytes.fromhex(raw.removeprefix("0x"))
+        else:
+            return 0.0, 0.0, 0.0, "unknown"
+
+        if dex in ("Uniswap V2", "Sushiswap"):
+            # Need at least 4 × 32 bytes = 128 bytes of non-indexed data.
+            if len(data) < 128:
+                return 0.0, 0.0, 0.0, "unknown"
+            a0in  = int.from_bytes(data[0:32],   "big")
+            a1in  = int.from_bytes(data[32:64],  "big")
+            a0out = int.from_bytes(data[64:96],  "big")
+            a1out = int.from_bytes(data[96:128], "big")
+            # Exactly one of the two "in" values should be non-zero.
+            if a0in > 0 and a1out > 0:
+                direction, amount_in, amount_out = "0_to_1", a0in, a1out
+            elif a1in > 0 and a0out > 0:
+                direction, amount_in, amount_out = "1_to_0", a1in, a0out
+            else:
+                return 0.0, 0.0, 0.0, "unknown"
+
+        elif dex == "Uniswap V3":
+            # First 64 bytes = amount0 (int256) and amount1 (int256).
+            if len(data) < 64:
+                return 0.0, 0.0, 0.0, "unknown"
+
+            def _int256(b: bytes) -> int:
+                # Two's-complement decode for int256.
+                v = int.from_bytes(b, "big")
+                return v - (1 << 256) if v >= (1 << 255) else v
+
+            a0 = _int256(data[0:32])
+            a1 = _int256(data[32:64])
+            # Positive delta  = token flows INTO the pool (spent by the swapper).
+            # Negative delta = token flows OUT of the pool (received by the swapper).
+            if a0 > 0 and a1 < 0:
+                direction, amount_in, amount_out = "0_to_1", a0, -a1
+            elif a1 > 0 and a0 < 0:
+                direction, amount_in, amount_out = "1_to_0", a1, -a0
+            else:
+                return 0.0, 0.0, 0.0, "unknown"
+        else:
+            return 0.0, 0.0, 0.0, "unknown"
+
+        if amount_out == 0:
+            return float(amount_in), 0.0, 0.0, direction
+
+        # price = cost per output unit (higher value ↔ worse rate for the swapper).
+        price = float(amount_in) / float(amount_out)
+        return float(amount_in), float(amount_out), price, direction
+
+    except Exception:
+        return 0.0, 0.0, 0.0, "unknown"
+
+
 def _parse_logs_to_swaps(
     logs: list,
     target_map: Dict[str, str],
@@ -309,15 +393,26 @@ def _parse_logs_to_swaps(
     for log in logs:
         addr = log["address"].lower()
         bn   = int(log["blockNumber"])
+        dex  = target_map.get(addr, "unknown")
+        # Decode swap direction, amounts, and approximate price from log data.
+        # This uses only data already present in the eth_getLogs response —
+        # no additional RPC calls.
+        amount_in, amount_out, price, direction = _decode_swap_amounts(log, dex)
         swaps.append({
             "tx_hash":      log["transactionHash"].hex(),
             "block_number": bn,
             "tx_index":     int(log["transactionIndex"]),
             "log_index":    int(log["logIndex"]),
             "address":      addr,
-            "dex":          target_map.get(addr, "unknown"),
+            "dex":          dex,
             "timestamp":    block_ts_map.get(bn, 0),
+            # Synthetic ETH value (token prices are not derivable from logs alone).
             "value_eth":    float(rng.lognormal(mean=0.4, sigma=0.8)),
+            # Decoded from log data — used by the sandwich detector.
+            "amount_in":    amount_in,
+            "amount_out":   amount_out,
+            "price":        price,       # amount_in / amount_out; higher = worse rate
+            "direction":    direction,   # "0_to_1" | "1_to_0" | "unknown"
         })
     swaps.sort(key=lambda s: (s["block_number"], s["tx_index"], s["log_index"]))
     return swaps
@@ -325,42 +420,269 @@ def _parse_logs_to_swaps(
 
 def _detect_sandwiches(swaps: List[dict]) -> List[dict]:
     """
-    Rileva pattern sandwich usando solo i dati già disponibili nei log:
-    - stessa pool address
-    - blocchi consecutivi (max distanza 1)
-    - tutti e tre i tx_hash diversi
-    - tx_index crescente (frontrun < victim < backrun)
-    Nessuna chiamata Infura aggiuntiva.
+    Research-grade sandwich detection using a per-pool sliding window.
+
+    Complexity: O(n) over swaps — the inner scan is bounded by WINDOW_SIZE^2 = 36.
+    No additional RPC calls: all signals are derived from log data decoded in
+    _parse_logs_to_swaps / _decode_swap_amounts.
+
+    ── Sliding-window structure ────────────────────────────────────────────────
+    Swaps are processed in sorted order (block, tx_index, log_index).
+    For each pool address a deque of at most WINDOW_SIZE recent swaps is kept.
+    When a new swap arrives it is appended; the oldest entry is auto-evicted
+    once the window exceeds WINDOW_SIZE.  Because swaps are ordered, a swap
+    that falls outside the window is too far back to be part of any new sandwich.
+
+    ── Pattern: frontrun  victim(s)  backrun ──────────────────────────────────
+    All three roles must belong to the same pool.  1–3 victims are allowed between
+    the attacker's two legs.
+
+    ── Nine filters applied per candidate (frontrun f, victims, backrun b) ────
+
+    1. Block distance  — b.block − f.block ≤ 1
+       MEV bots place both legs in the same or consecutive block.
+
+    2. Direction consistency
+       Swap direction is decoded from Swap log amounts (Step 1 in spec):
+           V2/Sushi: amount0In>0, amount1Out>0  → "0_to_1" (buy token1 with token0)
+                     amount1In>0, amount0Out>0  → "1_to_0"
+           V3:       amount0>0 (into pool)       → "0_to_1"
+                     amount1>0 (into pool)       → "1_to_0"
+       Valid sandwich: f.dir ≠ b.dir  AND  every victim.dir == f.dir.
+       (Attacker opens with one direction and closes with the opposite.)
+
+    3. Price impact — victim's effective price must be worse than frontrun's.
+       Price is estimated as amount_in / amount_out (cost per output unit).
+       BUY sandwich (f.dir = "0_to_1"):
+           Frontrun pushes pool price up; victim pays more → price_f < price_v1.
+       SELL sandwich (f.dir = "1_to_0"):
+           Frontrun pushes pool price down; victim receives less → price_f > price_v1.
+
+    4. Multi-victim slippage progression
+       Each successive victim must get an even worse price, confirming cumulative
+       pool-state manipulation:
+           BUY:  price_v1 ≤ price_v2 ≤ …
+           SELL: price_v1 ≥ price_v2 ≥ …
+
+    5. Backrun price reversion
+       Backrun closes the attacker's position, partially reversing the price:
+           BUY:  price_b < price_v1  (backrun SELL drives price back down)
+           SELL: price_b > price_v1  (backrun BUY drives price back up)
+
+    6. Round-trip size consistency
+       Attacker buys and sells a roughly equal position.
+       Proxy: max(amount_in, amount_out) per swap (token-agnostic magnitude).
+           0.3 ≤ back_size / front_size ≤ 3.0
+
+    7. Gas-ordering heuristic (MEV bot signal)
+       MEV bots submit both legs in the same block with very tight ordering.
+       Checked only when f.block == b.block:
+           0 < b.tx_index − f.tx_index ≤ MAX_TI_DIST (= 5)
+       Skipped across block boundaries (tx_index is not comparable between blocks).
+
+    8. Transaction uniqueness — f.tx_hash ≠ b.tx_hash.
+
+    9. At least one victim swap between f and b.
     """
-    sandwiches = []
-    n = len(swaps)
-    for i in range(n - 2):
-        f, v, b = swaps[i], swaps[i+1], swaps[i+2]
-        if f["address"] != v["address"] or f["address"] != b["address"]:
+    WINDOW_SIZE    = 6
+    MAX_BLOCK_DIST = 1
+    MAX_TI_DIST    = 5    # same-block tx_index gap; captures up to 4 victims + both legs
+    MAX_VICTIMS    = 3
+    ROUND_TRIP_MIN = 0.3
+    ROUND_TRIP_MAX = 3.0
+
+    # Per-pool sliding window (auto-bounded to WINDOW_SIZE by deque maxlen).
+    pool_windows: Dict[str, deque] = defaultdict(lambda: deque(maxlen=WINDOW_SIZE))
+    sandwiches: List[dict] = []
+    seen_pairs: Set        = set()   # (frontrun_tx_hash, backrun_tx_hash)
+
+    for swap in swaps:
+        pool = swap["address"]
+        win  = pool_windows[pool]
+        win.append(swap)
+
+        # Need at least 3 swaps in this pool's window before any pattern is possible.
+        if len(win) < 3:
             continue
-        if b["block_number"] - f["block_number"] > 1:
+
+        # ── Treat the newest swap as the candidate backrun ────────────────────
+        # We scan all earlier entries as candidate frontruns, with victims in between.
+        # This single-pass approach is O(WINDOW_SIZE²) = O(1) per swap → O(n) overall.
+        win_list = list(win)   # snapshot; len ≤ WINDOW_SIZE
+        b = win_list[-1]       # candidate backrun
+
+        if b["direction"] == "unknown":
             continue
-        # Tutti e tre i tx_hash devono essere diversi
-        if f["tx_hash"] == v["tx_hash"] or v["tx_hash"] == b["tx_hash"] or f["tx_hash"] == b["tx_hash"]:
-            continue
-        sandwiches.append({
-            "frontrun_tx":    f["tx_hash"],
-            "frontrun_block": f["block_number"],
-            "victim_tx":      v["tx_hash"],
-            "victim_block":   v["block_number"],
-            "backrun_tx":     b["tx_hash"],
-            "backrun_block":  b["block_number"],
-            "block":          f["block_number"],
-            "pool":           f["address"],
-            "dex":            f["dex"],
-            "timestamp":      f["timestamp"],
-        })
+
+        b_p    = b["price"]
+        b_size = max(b["amount_in"], b["amount_out"])
+
+        for fi, f in enumerate(win_list[:-2]):
+
+            # ── Filter 1: block distance ─────────────────────────────────────
+            blk_dist = b["block_number"] - f["block_number"]
+            if blk_dist > MAX_BLOCK_DIST or blk_dist < 0:
+                continue
+
+            # ── Filter 2: direction consistency ──────────────────────────────
+            f_dir = f["direction"]
+            if f_dir == "unknown":
+                continue
+            if f_dir == b["direction"]:   # same direction → not an attacker round-trip
+                continue
+
+            # ── Filter 8: transaction uniqueness ─────────────────────────────
+            if f["tx_hash"] == b["tx_hash"]:
+                continue
+
+            # ── Filter 7: gas-ordering heuristic (same-block only) ───────────
+            # MEV bots place both legs tightly in the same block.
+            # tx_index is not comparable across blocks, so skip for blk_dist = 1.
+            if blk_dist == 0:
+                ti_delta = b["tx_index"] - f["tx_index"]
+                if ti_delta <= 0 or ti_delta > MAX_TI_DIST:
+                    continue
+
+            # ── Filter 9: collect victims between f and b ────────────────────
+            # Victims must share the frontrun direction and be distinct transactions
+            # from both attacker legs.
+            victims = [
+                s for s in win_list[fi + 1 : -1]
+                if (s["direction"] == f_dir
+                    and s["tx_hash"] != f["tx_hash"]
+                    and s["tx_hash"] != b["tx_hash"])
+            ]
+            if not victims:
+                continue
+            victims = victims[:MAX_VICTIMS]   # cap at 3
+            v1      = victims[0]
+            v1_p    = v1["price"]
+
+            # ── Filter 3: price impact ───────────────────────────────────────
+            # Victim must receive a worse price than the frontrun.
+            # price = amount_in / amount_out (higher ↔ worse for the swapper).
+            # BUY  (0_to_1): frontrun buys, drives pool price up  → victim pays more
+            #                 → price_f  <  price_v1
+            # SELL (1_to_0): frontrun sells, drives pool price down → victim gets less
+            #                 → price_f  >  price_v1
+            f_p = f["price"]
+            if f_p > 0.0 and v1_p > 0.0:
+                if f_dir == "0_to_1":
+                    if not (f_p < v1_p):
+                        continue
+                else:
+                    if not (f_p > v1_p):
+                        continue
+
+            # ── Filter 4: multi-victim slippage progression ──────────────────
+            # Every subsequent victim must get an even worse price, proving that
+            # each swap worsens pool state monotonically.
+            if len(victims) > 1:
+                ok = True
+                for vi in range(1, len(victims)):
+                    p_prev = victims[vi - 1]["price"]
+                    p_cur  = victims[vi]["price"]
+                    if p_prev <= 0.0 or p_cur <= 0.0:
+                        continue   # skip pairs with unknown price
+                    if f_dir == "0_to_1" and p_cur < p_prev:
+                        ok = False
+                        break
+                    if f_dir == "1_to_0" and p_cur > p_prev:
+                        ok = False
+                        break
+                if not ok:
+                    continue
+
+            # ── Filter 5: backrun price reversion ────────────────────────────
+            # Backrun closes the attacker's position; pool price partially reverts.
+            # BUY:  attacker's SELL backrun drives price back down → price_b < price_v1
+            # SELL: attacker's BUY  backrun drives price back up   → price_b > price_v1
+            if b_p > 0.0 and v1_p > 0.0:
+                if f_dir == "0_to_1":
+                    if not (b_p < v1_p):
+                        continue
+                else:
+                    if not (b_p > v1_p):
+                        continue
+
+            # ── Filter 6: round-trip size consistency ────────────────────────
+            # Attacker opens and closes a position of similar magnitude.
+            # max(amount_in, amount_out) is a token-agnostic size proxy.
+            f_size = max(f["amount_in"], f["amount_out"])
+            if f_size > 0.0 and b_size > 0.0:
+                ratio = b_size / f_size
+                if not (ROUND_TRIP_MIN <= ratio <= ROUND_TRIP_MAX):
+                    continue
+
+            # ── Dedup ─────────────────────────────────────────────────────────
+            key = (f["tx_hash"], b["tx_hash"])
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+
+            # ── Record sandwich ───────────────────────────────────────────────
+            victims_info = [
+                {
+                    "tx_hash":      v["tx_hash"],
+                    "block_number": v["block_number"],
+                    "tx_index":     v["tx_index"],
+                    "address":      v["address"],
+                    "price":        v["price"],
+                }
+                for v in victims
+            ]
+            sandwiches.append({
+                # ── Backward-compatible flat fields (used by save_to_db) ──────
+                "frontrun_tx":    f["tx_hash"],
+                "frontrun_block": f["block_number"],
+                "victim_tx":      victims[0]["tx_hash"],   # primary (first) victim
+                "victim_block":   victims[0]["block_number"],
+                "backrun_tx":     b["tx_hash"],
+                "backrun_block":  b["block_number"],
+                "block":          f["block_number"],
+                "pool":           f["address"],
+                "dex":            f["dex"],
+                "timestamp":      f["timestamp"],
+                # ── Nested dicts for dashboard visualisation ──────────────────
+                "front": {
+                    "tx_hash":      f["tx_hash"],
+                    "block_number": f["block_number"],
+                    "tx_index":     f["tx_index"],
+                    "address":      f["address"],
+                    "price":        f["price"],
+                },
+                "victim": {
+                    "tx_hash":      victims[0]["tx_hash"],
+                    "block_number": victims[0]["block_number"],
+                    "tx_index":     victims[0]["tx_index"],
+                    "address":      victims[0]["address"],
+                    "price":        victims[0]["price"],
+                },
+                "back": {
+                    "tx_hash":      b["tx_hash"],
+                    "block_number": b["block_number"],
+                    "tx_index":     b["tx_index"],
+                    "address":      b["address"],
+                    "price":        b["price"],
+                },
+                # ── Multi-victim extension ────────────────────────────────────
+                "victims":   victims_info,
+                "n_victims": len(victims),
+                "direction": f_dir,   # "0_to_1" (buy sandwich) | "1_to_0" (sell sandwich)
+            })
+
     return sandwiches
 
 
 def save_to_db(result: dict, db_path: str) -> None:
     con = _get_db(db_path)
-    victim_hashes: Set[str] = {a["victim_tx"] for a in result["sandwich_attacks"]}
+    # Collect ALL victim hashes, including multi-victim sandwiches.
+    victim_hashes: Set[str] = set()
+    for a in result["sandwich_attacks"]:
+        for v in a.get("victims", [{"tx_hash": a.get("victim_tx", "")}]):
+            h = v.get("tx_hash", "")
+            if h:
+                victim_hashes.add(h)
     swap_rows = []
     for s in result["swaps"]:
         h      = s["tx_hash"]
