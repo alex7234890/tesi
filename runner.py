@@ -169,17 +169,25 @@ def run_single(
         # Average swap value for tint computation
         avg_swap_value_eth = sum(s.value_eth for s in swaps) / max(len(swaps), 1)
 
-        for swap in swaps:
+        # Pre-compute fraud assignments: frodi = % degli attacchi reali, NON degli swap totali
+        _n_real_today = sum(1 for s in swaps if s.is_attacked)
+        _n_fraud_total = round(_n_real_today * fraud_claim_pct)
+        _non_atk_idx = [i for i, s in enumerate(swaps) if not s.is_attacked]
+        _n_fraud_total = min(_n_fraud_total, len(_non_atk_idx))
+        _fraud_idx: set = set()
+        if _n_fraud_total > 0 and _non_atk_idx:
+            _chosen = rng.choice(len(_non_atk_idx), size=_n_fraud_total, replace=False)
+            _fraud_idx = {_non_atk_idx[j] for j in _chosen}
+
+        for _swap_i, swap in enumerate(swaps):
             # ---- Per-swap fraud classification ----
-            # Only non-attacked swaps can be fraudulent claimants
             is_fraud_caught  = False
             is_fraud_escaped = False
-            if not swap.is_attacked and fraud_claim_pct > 0.0:
-                if rng.random() < fraud_claim_pct:
-                    if rng.random() < (1.0 - e_cfg):
-                        is_fraud_caught = True   # detected, blocked
-                    else:
-                        is_fraud_escaped = True  # slipped through
+            if _swap_i in _fraud_idx:
+                if rng.random() < (1.0 - e_cfg):
+                    is_fraud_caught = True   # detected, blocked
+                else:
+                    is_fraud_escaped = True  # slipped through
 
             # ---- Premium — ALL tx (real, fraud, normal) pay premium ----
             premium = compute_premium(
