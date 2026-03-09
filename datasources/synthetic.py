@@ -57,7 +57,11 @@ class SyntheticDataSource(BaseDataSource):
         uc = config["users"]
         self.initial_count: int       = uc["initial_count"]
         self.growth_rate_daily: float = uc["growth_rate_daily"]
-        self.swaps_per_day: int       = int(uc.get("swaps_per_day", 100))
+        # Read swaps_per_day from simulation section first, fall back to users section
+        self.swaps_per_day: int       = int(
+            config.get("simulation", {}).get("swaps_per_day")
+            or uc.get("swaps_per_day", 100)
+        )
         self.swap_freq_mean: float    = uc["swap_frequency_mean"]
         self.coverage_dist: dict      = uc["coverage_distribution"]
         self.max_daily_swaps: int     = int(uc.get("max_daily_swaps", 99))

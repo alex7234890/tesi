@@ -3,6 +3,7 @@ simulation:
   duration_days: 180
   time_step: "1d"
   n_runs: 1
+  swaps_per_day: 100
 
 blockchain:
   infura_url: "wss://mainnet.infura.io/ws/v3/23727094121c4343b05d474e08e1a3ff"
