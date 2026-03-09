@@ -912,14 +912,14 @@ with tab_batch:
 
     b1, b2 = st.columns([1, 2])
     with b1:
-        _bn_steps = st.number_input("Passi per parametro", min_value=2, max_value=20, value=5, step=1, key="batch_n_steps",
+        _bn_steps = st.number_input("Passi per parametro", min_value=2, max_value=100, value=5, step=1, key="batch_n_steps",
                                      help="N valori equidistanti per ogni parametro in modalità Range")
         _b_use_real = st.toggle("Usa transazioni Infura", value=_cache_exists, disabled=not _cache_exists, key="batch_use_infura")
         _b_mode = 1 if _b_use_real else 2
     with b2:
         _b_params = st.multiselect(
             "Parametri variabili",
-            ["Patt", "L%", "E (FNR)", "Frodi%", "Pool iniziale", "Oracle reward"],
+            ["Patt", "L%", "E (FNR)", "Mbase", "Frodi%", "Pool iniziale", "Oracle reward"],
             default=["Patt", "E (FNR)"],
             key="batch_vars",
         )
@@ -933,6 +933,7 @@ with tab_batch:
             "Patt":          (0.02, 0.20),
             "L%":            (0.05, 0.40),
             "E (FNR)":       (0.05, 0.50),
+            "Mbase":         (0.05, 0.40),
             "Frodi%":        (0.0,  0.30),
             "Pool iniziale": (20.0, 200.0),
             "Oracle reward": (0.001, 0.01),
@@ -974,7 +975,7 @@ with tab_batch:
     with st.expander("📋 Riepilogo configurazione batch", expanded=True):
         _b_patt_mode  = _b_param_config.get("Patt",  {}).get("mode", "—")
         _b_fnr_mode   = _b_param_config.get("E (FNR)", {}).get("mode", "—")
-        _b_mbase_mode = "fisso"
+        _b_mbase_mode = _b_param_config.get("Mbase",  {}).get("mode", "fisso")
         _b_fraud_mode = _b_param_config.get("Frodi%", {}).get("mode", "—")
         _b_orc_mode   = _b_param_config.get("Oracle reward", {}).get("mode", "—")
         st.markdown(f"""
@@ -1008,6 +1009,7 @@ with tab_batch:
             if "Patt"          in _run_p: _rc["market"]["attack_rate"]          = _run_p["Patt"]
             if "L%"            in _run_p: _rc["market"]["loss_pct_mean"]        = _run_p["L%"]
             if "E (FNR)"       in _run_p: _rc["market"]["e"]                    = _run_p["E (FNR)"]
+            if "Mbase"         in _run_p: _rc["pool"]["mbase"]                  = _run_p["Mbase"]
             if "Frodi%"        in _run_p: _rc["simulation"]["fraud_claim_pct"]  = _run_p["Frodi%"]
             if "Pool iniziale" in _run_p: _rc["pool"]["initial_balance_eth"]    = _run_p["Pool iniziale"]
             if "Oracle reward" in _run_p: _rc.setdefault("oracles", {})["reward_patt_update_eth"] = _run_p["Oracle reward"]
