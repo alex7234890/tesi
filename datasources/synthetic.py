@@ -147,7 +147,7 @@ class SyntheticDataSource(BaseDataSource):
             n_swaps = min(n_swaps, self.max_daily_swaps)
 
             for i in range(n_swaps):
-                value_eth   = float(self.rng.lognormal(mean=0.4, sigma=0.8))
+                value_eth   = float(np.clip(self.rng.lognormal(np.log(0.5), 0.4), 0.01, 50.0))
                 is_attacked = self.rng.random() < patt
 
                 if is_attacked:

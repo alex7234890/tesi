@@ -92,16 +92,11 @@ class BlockchainDataSource(BaseDataSource):
             ]
             insured_swaps = []
             for r in insured_rows:
-                # value_eth in DB was generated with fixed seed 42 at download time;
-                # regenerate each run with self.rng for fresh randomness.
-                fresh_value = float(self.rng.lognormal(mean=0.4, sigma=0.8))
                 is_atk = bool(r["is_attacked"])
                 insured_swaps.append(
                     dict(
                         tx_hash=r["tx_hash"],
-                        value_eth=fresh_value,
                         is_attacked=is_atk,
-                        loss_eth=fresh_value * 0.20 if is_atk else 0.0,
                         timestamp=int(r["timestamp"]),
                         user_id=f"addr_{r['tx_hash'][:10]}",
                     )
@@ -133,15 +128,17 @@ class BlockchainDataSource(BaseDataSource):
         raw = self._days[real_day]
         swaps = []
         for r in raw:
+            value_eth = float(np.clip(self.rng.lognormal(np.log(0.5), 0.4), 0.01, 50.0))
+            is_atk    = r["is_attacked"]
             swaps.append(
                 Swap(
                     timestamp=r["timestamp"],
-                    value_eth=r["value_eth"],
-                    is_attacked=r["is_attacked"],
-                    loss_eth=r["loss_eth"],
+                    value_eth=value_eth,
+                    is_attacked=is_atk,
+                    loss_eth=value_eth * 0.20 if is_atk else 0.0,
                     coverage=self.coverage,
                     user_id=r["user_id"],
-                    user_tier=None,   # mode 1: no tiers
+                    user_tier=None,
                     tx_hash=r["tx_hash"],
                 )
             )
