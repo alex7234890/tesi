@@ -259,35 +259,28 @@ def fetch_dex_events(
                 block_ts_map[bn] = ref_ts + (bn - ref_bn) * 13
 
     if progress_cb:
-        progress_cb(92.0, "Parsing e rilevamento sandwich…")
+        progress_cb(92.0, "Parsing log…")
 
-    swaps            = _parse_logs_to_swaps(all_logs, target_map, block_ts_map)
-    sandwich_attacks = _detect_sandwiches(swaps)
+    swaps = _parse_logs_to_swaps(all_logs, target_map, block_ts_map)
 
-    total_sw  = len(swaps)
-    total_atk = len(sandwich_attacks)
-    raw_ratio = total_atk / max(total_sw, 1)
-    if total_sw >= 10000:
-        ms = 0.05
-    elif total_sw >= 1000:
-        ms = 0.10
-    else:
-        ms = 0.20
-    patt_value = float(np.clip(raw_ratio * (1 + ms), 0.001, 0.5))
+    total_sw = len(swaps)
+    # Count swaps per DEX for metadata
+    dex_counts: Dict[str, int] = {}
+    for s in swaps:
+        dex_counts[s["dex"]] = dex_counts.get(s["dex"], 0) + 1
 
     result = {
-        "swaps": swaps,
-        "sandwich_attacks": sandwich_attacks,
+        "swaps":             swaps,
+        "sandwich_attacks":  [],   # kept for schema compat; detection no longer run
         "metadata": {
             "fetched_at":        datetime.now(timezone.utc).isoformat(),
             "start_block":       start_block,
             "end_block":         latest_block,
+            "total_blocks":      total_blocks,
+            "total_chunks":      n_chunks,
             "days":              days,
             "total_swaps":       total_sw,
-            "total_sandwiches":  total_atk,
-            "raw_ratio":         raw_ratio,
-            "ms_applied":        ms,
-            "patt_value":        patt_value,
+            "dex_counts":        dex_counts,
             "infura_calls_used": infura_calls,
             "dex_targets":       dex_targets,
         },
@@ -296,7 +289,7 @@ def fetch_dex_events(
         pickle.dump(result, f)
     logger.info(f"Cache salvata: {cache_file}")
     if progress_cb:
-        progress_cb(100.0, f"✅ {len(swaps)} swap, {len(sandwich_attacks)} sandwich, {infura_calls} chiamate Infura")
+        progress_cb(100.0, f"✅ {total_sw:,} swap | {infura_calls} chiamate Infura")
     return result
 
 
@@ -753,8 +746,7 @@ def main() -> None:
     result = fetch_dex_events(infura_url, days, args.dex, _cache_dir(db_path))
     save_to_db(result, db_path)
     meta = result["metadata"]
-    print(f"\n✅ {meta['total_swaps']} swap, {meta['total_sandwiches']} sandwich, "
-          f"{meta['infura_calls_used']} chiamate Infura\nDB: {db_path}\n")
+    print(f"\n✅ {meta['total_swaps']:,} swap | {meta['infura_calls_used']} chiamate Infura\nDB: {db_path}\n")
 
 
 if __name__ == "__main__":

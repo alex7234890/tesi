@@ -62,7 +62,7 @@ class MetricsCollector:
         loss_pct = pool.get_m_total()  # not ideal but we don't have it here; dashboard reads from config
         term1    = patt  # just store patt; term1 = patt * loss_pct computed in dashboard
         e_safe   = max(min(e, 0.9999), 0.0001)
-        term2    = (tint * (e_safe / (1.0 - e_safe))) / (vbase * 1000.0)
+        term2    = (tint * (e_safe / (1.0 - e_safe))) / max(vbase, 1.0)  # Tint in ETH, Vbase in n_swaps
 
         row: Dict[str, Any] = {
             # Tick

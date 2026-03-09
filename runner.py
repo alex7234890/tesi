@@ -297,7 +297,7 @@ def run_single(
         _e_safe_d = max(min(e_cfg, 0.9999), 0.0001)
         _l_pct_d  = l_pct
         _term1_d  = patt * _l_pct_d
-        _term2_d  = (tint_today * (_e_safe_d / (1.0 - _e_safe_d))) / (max(vbase_today, 1.0) * 1000.0)
+        _term2_d  = (tint_today * (_e_safe_d / (1.0 - _e_safe_d))) / max(vbase_today, 1.0) if vbase_today > 0 else 0.0
         _prem_rate_d = (_term1_d + _term2_d) * (1.0 + m_total) * fcov_payout
 
         # ---- Collect metrics ----
