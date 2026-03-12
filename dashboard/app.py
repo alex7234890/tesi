@@ -168,6 +168,11 @@ with st.sidebar.expander("⚙️ Parametri Protocollo"):
 with st.sidebar.expander("📐 Formula Premio"):
     e_fnr = st.slider("E — False Negative Rate (FNR)", 0.01, 0.99, 0.20, 0.01, key="fp_e_fnr",
                       help="Tasso di falsi negativi (attacchi non rilevati). Usato come E/(1−E) nella formula.")
+    min_premium_pct = st.number_input(
+        "Floor minimo premio (% swap value)", min_value=0.001, max_value=0.10, value=0.015,
+        step=0.001, format="%.3f", key="fp_min_premium_pct",
+        help="Floor applicato PRIMA di Fcov. Se il premio calcolato è < floor×V, usa floor×V. Default 1.5%.",
+    )
     st.caption("ℹ️ Vbase e Tint sono calcolati automaticamente ogni giorno simulato.")
 
 with st.sidebar.expander("🚨 Parametri Frodi"):
@@ -212,6 +217,7 @@ def _build_config(
     patt_override,
     e_fnr, fraud_claim_pct,
     oracle_reward_per_claim=0.002,
+    min_premium_pct=0.015,
 ) -> dict:
     cfg_path = os.path.join(
         _ROOT, "config",
@@ -240,8 +246,11 @@ def _build_config(
         cfg["simulation"]["swaps_per_day"]  = int(swaps_per_day)
         cfg["users"]["max_daily_swaps"]     = int(max_daily_swaps)
 
-    # Oracle reward
-    cfg.setdefault("oracles", {})["reward_patt_update_eth"] = float(oracle_reward_per_claim)
+    # Oracle reward (usa nuovo nome canonico)
+    cfg.setdefault("oracles", {})["oracle_reward_per_claim"] = float(oracle_reward_per_claim)
+
+    # Floor minimo premio
+    cfg.setdefault("premium", {})["min_premium_pct"] = float(min_premium_pct)
 
     return cfg
 
@@ -257,6 +266,7 @@ def _all_params() -> dict:
         n_synthetic_users=n_synthetic_users, max_daily_swaps=max_daily_swaps,
         e_fnr=e_fnr, fraud_claim_pct=fraud_claim_pct,
         oracle_reward_per_claim=oracle_reward_per_claim,
+        min_premium_pct=min_premium_pct,
         use_infura_txs=use_infura_txs,
     )
 
@@ -278,6 +288,7 @@ def _make_cfg(**kwargs) -> dict:
         e_fnr=kwargs.get("e_fnr", e_fnr),
         fraud_claim_pct=kwargs.get("fraud_claim_pct", fraud_claim_pct),
         oracle_reward_per_claim=kwargs.get("oracle_reward_per_claim", oracle_reward_per_claim),
+        min_premium_pct=kwargs.get("min_premium_pct", min_premium_pct),
     )
 
 
@@ -914,12 +925,18 @@ with tab_batch:
     with b1:
         _bn_steps = st.number_input("Passi per parametro", min_value=2, max_value=100, value=5, step=1, key="batch_n_steps",
                                      help="N valori equidistanti per ogni parametro in modalità Range")
+        _runs_per_step = st.number_input(
+            "Runs per passo (media)", min_value=1, max_value=50, value=1, step=1,
+            key="batch_runs_per_step",
+            help="Se > 1, ogni combinazione viene eseguita N volte con seed distinti e i risultati vengono mediati. "
+                 "pool_survived diventa pool_survival_rate (0–1).",
+        )
         _b_use_real = st.toggle("Usa transazioni Infura", value=_cache_exists, disabled=not _cache_exists, key="batch_use_infura")
         _b_mode = 1 if _b_use_real else 2
     with b2:
         _b_params = st.multiselect(
             "Parametri variabili",
-            ["Patt", "L%", "E (FNR)", "Mbase", "Frodi%", "Pool iniziale", "Oracle reward"],
+            ["Patt", "L%", "E (FNR)", "Mbase", "Frodi%", "Pool iniziale", "Oracle reward", "Min premio%"],
             default=["Patt", "E (FNR)"],
             key="batch_vars",
         )
@@ -937,6 +954,7 @@ with tab_batch:
             "Frodi%":        (0.0,  0.30),
             "Pool iniziale": (20.0, 200.0),
             "Oracle reward": (0.001, 0.01),
+            "Min premio%":   (0.005, 0.05),
         }
         for _bi, _bp in enumerate(_b_params):
             with _pc_cols[_bi % len(_pc_cols)]:
@@ -972,82 +990,142 @@ with tab_batch:
     _total_combos = len(_batch_combos(_b_param_config, int(_bn_steps))) if _b_param_config else int(_bn_steps)
 
     # --- Riepilogo configurazione batch ---
+    _total_runs_batch = _total_combos * int(_runs_per_step)
     with st.expander("📋 Riepilogo configurazione batch", expanded=True):
         _b_patt_mode  = _b_param_config.get("Patt",  {}).get("mode", "—")
         _b_fnr_mode   = _b_param_config.get("E (FNR)", {}).get("mode", "—")
         _b_mbase_mode = _b_param_config.get("Mbase",  {}).get("mode", "fisso")
         _b_fraud_mode = _b_param_config.get("Frodi%", {}).get("mode", "—")
         _b_orc_mode   = _b_param_config.get("Oracle reward", {}).get("mode", "—")
+        _b_minp_mode  = _b_param_config.get("Min premio%", {}).get("mode", "—")
         st.markdown(f"""
 | Parametro | Valore base | Variazione |
 |-----------|------------|-----------|
 | Passi per parametro | {_bn_steps} | — |
+| Runs per passo | {_runs_per_step} | — |
 | Patt | {patt_override:.3f} | {_b_patt_mode} |
 | E (FNR) | {e_fnr:.2f} | {_b_fnr_mode} |
 | Mbase | {mbase:.2f} | {_b_mbase_mode} |
 | Frodi% | {fraud_claim_pct:.2f} | {_b_fraud_mode} |
 | Oracle reward | {oracle_reward_per_claim:.4f} ETH | {_b_orc_mode} |
+| Min premio% | {min_premium_pct:.3f} | {_b_minp_mode} |
 | Pool iniziale | {initial_pool_balance:.1f} ETH | — |
 | **Combinazioni totali** | **{_total_combos}** | — |
+| **Simulazioni totali** | **{_total_runs_batch}** | (combos × runs/passo) |
 """)
-        if _total_combos > 400:
-            st.warning(f"⚠️ {_total_combos} combinazioni — riduci i passi o i parametri variabili")
-        elif _total_combos > 100:
-            st.info(f"ℹ️ {_total_combos} combinazioni — potrebbe richiedere qualche minuto")
+        if _total_runs_batch > 400:
+            st.warning(f"⚠️ {_total_runs_batch} simulazioni totali — riduci i passi, runs o parametri variabili")
+        elif _total_runs_batch > 100:
+            st.info(f"ℹ️ {_total_runs_batch} simulazioni totali — potrebbe richiedere qualche minuto")
 
     _batch_run_btn = st.button("✅ Confermo — Avvia Batch", type="primary", key="batch_run_btn")
 
     if _batch_run_btn:
-        _b_combos  = _batch_combos(_b_param_config, int(_bn_steps))
-        _b_results = []
-        _b_prog    = st.progress(0, text="Avvio batch…")
-        _b_cfg_base = _make_cfg(mode=_b_mode)
+        _b_combos      = _batch_combos(_b_param_config, int(_bn_steps))
+        _b_results     = []
+        _b_prog        = st.progress(0, text="Avvio batch…")
+        _b_cfg_base    = _make_cfg(mode=_b_mode)
+        _rps           = int(_runs_per_step)
+        _n_combos      = max(len(_b_combos), 1)
+        _total_sims    = _n_combos * _rps
+        # Seed base deterministico catturato all'avvio del batch
+        _batch_base_seed = int(_time_mod.time() * 1000) % 99999
 
+        def _apply_params(rc: dict, run_p: dict) -> None:
+            """Applica i parametri variabili al config dict."""
+            if "Patt"          in run_p: rc["market"]["attack_rate"]                      = run_p["Patt"]
+            if "L%"            in run_p: rc["market"]["loss_pct_mean"]                    = run_p["L%"]
+            if "E (FNR)"       in run_p: rc["market"]["e"]                                = run_p["E (FNR)"]
+            if "Mbase"         in run_p: rc["pool"]["mbase"]                              = run_p["Mbase"]
+            if "Frodi%"        in run_p: rc["simulation"]["fraud_claim_pct"]              = run_p["Frodi%"]
+            if "Pool iniziale" in run_p: rc["pool"]["initial_balance_eth"]                = run_p["Pool iniziale"]
+            if "Oracle reward" in run_p: rc.setdefault("oracles", {})["oracle_reward_per_claim"] = run_p["Oracle reward"]
+            if "Min premio%"   in run_p: rc.setdefault("premium", {})["min_premium_pct"] = run_p["Min premio%"]
+
+        _sim_done = 0
         for _bi, _run_p in enumerate(_b_combos):
-            _rc = copy.deepcopy(_b_cfg_base)
-            _rc["simulation"]["seed"] = (int(_time_mod.time() * 1000) + _bi) % 99999
-            if "Patt"          in _run_p: _rc["market"]["attack_rate"]          = _run_p["Patt"]
-            if "L%"            in _run_p: _rc["market"]["loss_pct_mean"]        = _run_p["L%"]
-            if "E (FNR)"       in _run_p: _rc["market"]["e"]                    = _run_p["E (FNR)"]
-            if "Mbase"         in _run_p: _rc["pool"]["mbase"]                  = _run_p["Mbase"]
-            if "Frodi%"        in _run_p: _rc["simulation"]["fraud_claim_pct"]  = _run_p["Frodi%"]
-            if "Pool iniziale" in _run_p: _rc["pool"]["initial_balance_eth"]    = _run_p["Pool iniziale"]
-            if "Oracle reward" in _run_p: _rc.setdefault("oracles", {})["reward_patt_update_eth"] = _run_p["Oracle reward"]
-
             _run_p_rounded = {k: round(float(v), 6) for k, v in _run_p.items()}
-            try:
-                _c, _p, _s = run_single(_rc, mode=_b_mode, coverage=coverage, db_path=_DB_PATH)
-                _df_run = _c.to_dataframe()
-                _b_results.append({
-                    "run": _bi + 1,
-                    **_run_p_rounded,
-                    "pool_survived":      _s["pool_survived"],
-                    "profitto_eth":       round(_s["total_profit_eth"], 4),
-                    "sr_finale":          round(_s["final_solvency_ratio"], 4),
-                    "giorno_rottura":     (_s.get("breakdown_event") or {}).get("day", "—"),
-                    "trend_eth_giorno":   round(_s.get("trend_slope", 0.0), 4),
-                    "premio_medio_pct":   round(_s.get("avg_premium_rate_pct", 0.0), 4),
-                    "term1_medio":        round(_s.get("avg_term1", 0.0), 6),
-                    "term2_medio":        round(_s.get("avg_term2", 0.0), 6),
-                    "oracle_cost_totale": round(_s.get("total_oracle_cost_eth", 0.0), 4),
-                    "payout_reali_eth":   round(_s.get("total_real_payouts_eth", 0.0), 4),
-                    "payout_frodi_eth":   round(_s.get("total_fraud_payouts_eth", 0.0), 4),
-                    "_df":                _df_run,
-                })
-            except Exception as _bex:
-                _b_results.append({
-                    "run": _bi + 1, **_run_p_rounded,
-                    "pool_survived": False, "profitto_eth": 0.0,
-                    "sr_finale": 0.0, "giorno_rottura": "—",
-                    "trend_eth_giorno": 0.0, "premio_medio_pct": 0.0,
-                    "term1_medio": 0.0, "term2_medio": 0.0,
-                    "oracle_cost_totale": 0.0, "payout_reali_eth": 0.0, "payout_frodi_eth": 0.0,
-                    "_df": None, "_error": str(_bex),
-                })
-            _b_prog.progress((_bi + 1) / max(len(_b_combos), 1), text=f"Run {_bi+1}/{len(_b_combos)}…")
+
+            # Recupera i valori fissi (non variati) per le colonne sempre presenti nel CSV
+            _rc_snap = copy.deepcopy(_b_cfg_base)
+            _apply_params(_rc_snap, _run_p)
+            _oracle_reward_val = float(
+                _rc_snap.get("oracles", {}).get("oracle_reward_per_claim",
+                _rc_snap.get("oracles", {}).get("reward_patt_update_eth", oracle_reward_per_claim))
+            )
+            _min_prem_val = float(_rc_snap.get("premium", {}).get("min_premium_pct", min_premium_pct))
+
+            # --- Esegui _rps runs con seed distinti e deterministici ---
+            _run_summaries = []
+            _run_dfs       = []
+            for _ri in range(_rps):
+                _rc = copy.deepcopy(_b_cfg_base)
+                # seed = base + bi*100 + ri  → deterministico ma distinto per ogni run
+                _rc["simulation"]["seed"] = (_batch_base_seed + _bi * 100 + _ri) % 99999
+                _apply_params(_rc, _run_p)
+                _sim_done += 1
+                _prog_text = (
+                    f"Passo {_bi+1}/{_n_combos}, run {_ri+1}/{_rps} "
+                    f"(tot {_sim_done}/{_total_sims})…"
+                )
+                _b_prog.progress(_sim_done / _total_sims, text=_prog_text)
+                try:
+                    _c, _p_pool, _s = run_single(_rc, mode=_b_mode, coverage=coverage, db_path=_DB_PATH)
+                    _run_summaries.append(_s)
+                    _run_dfs.append(_c.to_dataframe())
+                except Exception as _bex:
+                    _run_summaries.append({"_error": str(_bex), "pool_survived": False,
+                                           "total_profit_eth": 0.0, "final_solvency_ratio": 0.0,
+                                           "breakdown_event": None, "trend_slope": 0.0,
+                                           "avg_premium_rate_pct": 0.0, "avg_term1": 0.0,
+                                           "avg_term2": 0.0, "total_oracle_cost_eth": 0.0,
+                                           "total_real_payouts_eth": 0.0, "total_fraud_payouts_eth": 0.0})
+                    _run_dfs.append(None)
+
+            # --- Aggrega i risultati (media per numerici, frazione per booleani) ---
+            _n_ok   = len(_run_summaries)
+            _n_surv = sum(1 for s in _run_summaries if s.get("pool_survived", False))
+            _surv_rate = _n_surv / max(_n_ok, 1)
+
+            def _smean(key: str, default: float = 0.0) -> float:
+                vals = [s.get(key, default) for s in _run_summaries
+                        if not s.get("_error")]
+                return float(np.mean(vals)) if vals else default
+
+            # Per giorno_rottura prendiamo il peggiore (min day) delle run fallite
+            _gg_rot_vals = [
+                s.get("breakdown_event", {}).get("day")
+                for s in _run_summaries
+                if s.get("breakdown_event") and not s.get("_error")
+            ]
+            _giorno_rottura = min(_gg_rot_vals) if _gg_rot_vals else "—"
+
+            # DataFrame rappresentativo: prima run andata a buon fine
+            _repr_df = next((df for df in _run_dfs if df is not None), None)
+
+            _b_results.append({
+                "run":                _bi + 1,
+                **_run_p_rounded,
+                "oracle_reward_per_claim": round(_oracle_reward_val, 6),
+                "min_premium_pct":         round(_min_prem_val, 6),
+                "runs_per_step":           _rps,
+                "pool_survival_rate":      round(_surv_rate, 4),
+                "pool_survived":           _surv_rate == 1.0,
+                "profitto_eth":            round(_smean("total_profit_eth"), 4),
+                "sr_finale":               round(_smean("final_solvency_ratio"), 4),
+                "giorno_rottura":          _giorno_rottura,
+                "trend_eth_giorno":        round(_smean("trend_slope"), 4),
+                "premio_medio_pct":        round(_smean("avg_premium_rate_pct"), 4),
+                "term1_medio":             round(_smean("avg_term1"), 6),
+                "term2_medio":             round(_smean("avg_term2"), 6),
+                "oracle_cost_totale":      round(_smean("total_oracle_cost_eth"), 4),
+                "payout_reali_eth":        round(_smean("total_real_payouts_eth"), 4),
+                "payout_frodi_eth":        round(_smean("total_fraud_payouts_eth"), 4),
+                "_df":                     _repr_df,
+            })
 
         st.session_state["batch_results"] = _b_results
-        _b_prog.progress(100, text="✅ Batch completato!")
+        _b_prog.progress(1.0, text="✅ Batch completato!")
         st.rerun()
 
     # --- Show results ---

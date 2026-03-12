@@ -110,10 +110,16 @@ def run_single(
     # -----------------------------------------------------------------
     # Premium formula parameters (from config)
     # -----------------------------------------------------------------
-    e_cfg           = float(config.get("market", {}).get("e", 0.20))
-    fraud_claim_pct = float(config.get("simulation", {}).get("fraud_claim_pct", 0.05))
-    fcov_payout     = _FCOV_PAYOUT.get(coverage.lower(), 1.00)
-    oracle_reward   = float(config.get("oracles", {}).get("reward_patt_update_eth", 0.002))
+    e_cfg            = float(config.get("market", {}).get("e", 0.20))
+    fraud_claim_pct  = float(config.get("simulation", {}).get("fraud_claim_pct", 0.05))
+    fcov_payout      = _FCOV_PAYOUT.get(coverage.lower(), 1.00)
+    min_premium_pct  = float(config.get("premium", {}).get("min_premium_pct", 0.015))
+    # oracle_reward_per_claim: legge il nuovo nome con fallback al vecchio
+    _oracles_cfg = config.get("oracles", {})
+    oracle_reward = float(
+        _oracles_cfg.get("oracle_reward_per_claim",
+        _oracles_cfg.get("reward_patt_update_eth", 0.002))
+    )
 
     # -----------------------------------------------------------------
     # Rolling state across days
@@ -201,6 +207,7 @@ def run_single(
                 tint=tint_today,
                 e=e_cfg,
                 vbase=vbase_today,
+                min_premium_pct=min_premium_pct,
             )
             pool.add_premium(premium)
             pool.register_policy()

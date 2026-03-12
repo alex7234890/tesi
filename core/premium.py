@@ -1,17 +1,18 @@
 """
 Premium formula:
 
-  P = V × [(Patt × L%) + (Tint × E/(1−E)) / Vbase] × (1 + M) × Fcov
+  P = V × max([(Patt × L%) + (Tint × E/(1−E)) / Vbase] × (1 + M), min_premium_pct) × Fcov
 
 Where:
-  V    — swap value in ETH
-  Patt — sandwich attack probability (real or simulated)
-  L%   — average loss percentage
-  Tint — total ETH value of fraud swaps intercepted the previous day
-  E    — False Negative Rate  →  E/(1−E) multiplier
-  Vbase — number of insured swaps in last 24h
-  M    — Mbase + Madj
-  Fcov — 0.70 (low) | 0.90 (medium) | 1.00 (high)
+  V               — swap value in ETH
+  Patt            — sandwich attack probability (real or simulated)
+  L%              — average loss percentage
+  Tint            — total ETH value of fraud swaps intercepted the previous day
+  E               — False Negative Rate  →  E/(1−E) multiplier
+  Vbase           — number of insured swaps in last 24h
+  M               — Mbase + Madj
+  min_premium_pct — floor applicato PRIMA di Fcov (default 1.5% del valore swap)
+  Fcov            — 0.70 (low) | 0.90 (medium) | 1.00 (high)
 """
 from __future__ import annotations
 
@@ -27,11 +28,18 @@ def compute_premium(
     tint: float = 8000.0,
     e: float = 0.20,
     vbase: float = 100.0,
+    min_premium_pct: float = 0.015,
 ) -> float:
-    """P = V × [(Patt × L%) + (Tint × E/(1−E)) / Vbase] × (1+M) × Fcov"""
-    fcov   = _FCOV.get(coverage.lower(), 1.00)
-    term1  = patt * loss_pct
-    e_safe = max(min(e, 0.9999), 0.0001)
-    term2  = (tint * (e_safe / (1.0 - e_safe))) / max(vbase, 1.0)
-    premium = value_eth * (term1 + term2) * (1.0 + m_total) * fcov
+    """P = V × max([(Patt×L%) + (Tint×E/(1−E))/Vbase] × (1+M), min_premium_pct) × Fcov
+
+    Il floor min_premium_pct viene applicato PRIMA di moltiplicare per Fcov,
+    in modo da rimanere coerente con i livelli di copertura.
+    """
+    fcov     = _FCOV.get(coverage.lower(), 1.00)
+    term1    = patt * loss_pct
+    e_safe   = max(min(e, 0.9999), 0.0001)
+    term2    = (tint * (e_safe / (1.0 - e_safe))) / max(vbase, 1.0)
+    base_pct = (term1 + term2) * (1.0 + m_total)
+    base_pct = max(base_pct, min_premium_pct)   # floor prima di Fcov
+    premium  = value_eth * base_pct * fcov
     return max(premium, 0.0)
