@@ -43,6 +43,9 @@ pool:
     medium_risk: 0.05
     healthy: 0.00
 
+premium:
+  min_premium_pct: 0.015   # floor 1.5% applicato prima di Fcov
+
 fraud_detection:
   user_fraud_rate: 0.05
   oracle_dishonest_rate: 0.10
@@ -70,7 +73,7 @@ oracles:
   n_selected_per_claim: 5
   stake_min_eth: 2.0
   reward_per_claim_eth: 0.005
-  reward_patt_update_eth: 0.002
+  oracle_reward_per_claim: 0.002   # reward per oracle per claim (ex reward_patt_update_eth)
   reward_captcha_eth: 0.001
   watchlist:
     entry_divergences: 2
