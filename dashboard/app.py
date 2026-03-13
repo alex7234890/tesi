@@ -173,7 +173,7 @@ with st.sidebar.expander("📐 Formula Premio"):
         step=0.001, format="%.3f", key="fp_min_premium_pct",
         help="Floor applicato PRIMA di Fcov. Se il premio calcolato è < floor×V, usa floor×V. Default 1.5%.",
     )
-    st.caption("ℹ️ Vbase e Tint sono calcolati automaticamente ogni giorno simulato.")
+    st.caption("ℹ️ Vbase, Tint e C_oracle_24h sono calcolati automaticamente ogni giorno simulato.")
 
 with st.sidebar.expander("🚨 Parametri Frodi"):
     fraud_claim_pct = st.slider(
@@ -328,7 +328,8 @@ def render_riepilogo(p: dict) -> str:
             "- Valore swap in ETH: stimato sinteticamente (log-normale, media ~0.5 ETH)\n"
             "- Patt: slider manuale + rumore ±30%/giorno\n"
             "- **Vbase**: conteggio swap assicurati reali del giorno D-1 (da Infura)\n"
-            "- **Tint** (ETH): n_frodi_intercettate_{D-1} × valore_medio_swap_{D-1}"
+            "- **Tint** (ETH): n_frodi_intercettate_{D-1} × valore_medio_swap_{D-1}\n"
+            "- **C_oracle_24h** (ETH): costo oracle totale osservato nel giorno D-1"
         )
     else:
         ds_block = (
@@ -337,7 +338,8 @@ def render_riepilogo(p: dict) -> str:
             "- Valore swap: log-normale (media ~0.5 ETH, σ=0.4)\n"
             "- Patt: slider manuale + rumore ±30%/giorno\n"
             "- **Vbase**: conteggio swap sintetici assicurati del giorno D-1\n"
-            "- **Tint** (ETH): n_frodi_intercettate_{D-1} × valore_medio_swap_{D-1}"
+            "- **Tint** (ETH): n_frodi_intercettate_{D-1} × valore_medio_swap_{D-1}\n"
+            "- **C_oracle_24h** (ETH): costo oracle totale osservato nel giorno D-1"
         )
 
     return (
@@ -348,8 +350,9 @@ def render_riepilogo(p: dict) -> str:
         f"**Copertura:** {p['coverage_label']} → rimborso {reimb}, Fcov={_fcov:.2f}\n\n"
         "---\n\n"
         "### Formula Premio\n\n"
-        "```\nP = V × [(Patt × L%) + (Tint × E/(1−E)) / Vbase] × (1 + M) × Fcov\n```\n\n"
+        "```\nP = V × [(Patt × L%) + (Tint × E/(1−E)) / Vbase + C_oracle_24h / Vbase] × (1 + M) × Fcov\n```\n\n"
         "> Tint in ETH = somma valore swap delle frodi intercettate ieri  \n"
+        "> C_oracle_24h = costo oracle totale osservato nelle ultime 24h (D-1)  \n"
         "> Vbase = numero di swap assicurati ieri\n\n"
         f"| Parametro | Valore | Fonte |\n|---|---|---|\n"
         f"| Patt | {patt_ex:.2%} | {patt_src} |\n"
@@ -357,6 +360,7 @@ def render_riepilogo(p: dict) -> str:
         f"| E (FNR) | {_e:.3f} → E/(1−E) = {_e_safe/(1-_e_safe):.4f} | configurabile |\n"
         f"| **Vbase** | calcolato automaticamente | swap assicurati giorno D-1 |\n"
         f"| **Tint** | calcolato automaticamente | frodi_caught_{'{D-1}'} × avg_swap_value |\n"
+        f"| **C_oracle_24h** | calcolato automaticamente | costo oracle totale giorno D-1 |\n"
         f"| Mbase | {p['mbase']:.2%} | configurabile |\n"
         f"| M_adj | 0.00/0.05/0.10 in base al SR | dinamico |\n"
         f"| Fcov | {_fcov:.2f} | copertura {p['coverage_label']} |\n\n"
@@ -438,7 +442,7 @@ with tab_sim:
                  f"🔗 Da Infura: {_patt_disp}" if use_infura_patt else f"✏️ Manuale: {_patt_disp}",
                  "green" if use_infura_patt else "blue")
     with _fc3:
-        info_box("Vbase/Tint", "📊 Calcolati automaticamente dai dati del giorno precedente", "blue")
+        info_box("Vbase/Tint/C_oracle", "📊 Calcolati automaticamente dai dati del giorno precedente", "blue")
 
     results    = st.session_state["results"]
     summaries  = st.session_state["summaries"]
@@ -700,30 +704,35 @@ with tab_sim:
                 ]
             }), use_container_width=True, hide_index=True)
 
-            # ---- Term1 / Term2 visual section ----
-            st.markdown("#### 📐 Term1 e Term2 del Giorno")
+            # ---- Term1 / Term2 / Term3 visual section ----
+            st.markdown("#### 📐 Term1, Term2 e Term3 del Giorno")
             _t1_vis = float(row.get("patt_current", 0.0)) * float(row.get("loss_pct_current", loss_pct))
             _e_vis  = float(row.get("e_today", e_fnr))
             _e_vis  = max(min(_e_vis, 0.9999), 0.0001)
             _tint_vis  = float(row.get("tint_today", 0.0))
             _vbase_vis = float(row.get("vbase_today", 100.0))
             _t2_vis = (_tint_vis * (_e_vis / (1.0 - _e_vis))) / max(_vbase_vis, 1.0) if _vbase_vis > 0 else 0.0
+            _t3_vis = float(row.get("term3_today", 0.0))
             _madj_vis = float(row.get("madj_current", 0.0))
             _mtot_vis = float(row.get("m_total_current", mbase))
-            _rate_vis = (_t1_vis + _t2_vis) * (1.0 + _mtot_vis) * fcov * 100.0
-            _cv1, _cv2, _cv3 = st.columns(3)
+            _rate_vis = (_t1_vis + _t2_vis + _t3_vis) * (1.0 + _mtot_vis) * fcov * 100.0
+            _cv1, _cv2, _cv3, _cv4 = st.columns(4)
             _cv1.metric("Term1 (Patt × L%)", f"{_t1_vis:.4f}", help="Rischio attacchi reali")
             _cv2.metric("Term2 (frodi non rilevate)", f"{_t2_vis:.4f}", help="Costo frodi che sfuggono al rilevamento")
-            _cv3.metric("Premio medio applicato", f"{_rate_vis:.3f}%", help="% del valore swap pagata come premio")
-            _tot_vis = _t1_vis + _t2_vis if (_t1_vis + _t2_vis) > 0 else 1e-9
+            _cv3.metric("Term3 (costi operativi oracle)", f"{_t3_vis:.4f}", help="C_oracle_24h / Vbase")
+            _cv4.metric("Premio medio applicato", f"{_rate_vis:.3f}%", help="% del valore swap pagata come premio")
+            _tot_vis = _t1_vis + _t2_vis + _t3_vis if (_t1_vis + _t2_vis + _t3_vis) > 0 else 1e-9
             _pct1_vis = _t1_vis / _tot_vis * 100
             _pct2_vis = _t2_vis / _tot_vis * 100
+            _pct3_vis = _t3_vis / _tot_vis * 100
             st.markdown(
                 f'<div style="display:flex;height:20px;border-radius:4px;overflow:hidden;margin:4px 0">'
                 f'<div style="width:{_pct1_vis:.0f}%;background:#1f77b4;display:flex;align-items:center;'
                 f'justify-content:center;color:white;font-size:11px">Term1 {_pct1_vis:.0f}%</div>'
                 f'<div style="width:{_pct2_vis:.0f}%;background:#ff7f0e;display:flex;align-items:center;'
                 f'justify-content:center;color:white;font-size:11px">Term2 {_pct2_vis:.0f}%</div>'
+                f'<div style="width:{_pct3_vis:.0f}%;background:#2ca02c;display:flex;align-items:center;'
+                f'justify-content:center;color:white;font-size:11px">Term3 {_pct3_vis:.0f}%</div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -740,7 +749,8 @@ with tab_sim:
                 _mtot_d  = float(row.get("m_total_current", mbase))
                 _term1   = _patt_d * loss_pct
                 _term2   = (_tint_d * _e_ratio) / max(_vbase_d, 1.0) if _vbase_d > 0 else 0.0
-                _sum_t   = _term1 + _term2
+                _term3   = float(row.get("term3_today", 0.0))
+                _sum_t   = _term1 + _term2 + _term3
                 _fcov_d  = fcov
                 _ex_prem = 1.0 * _sum_t * (1.0 + _mtot_d) * _fcov_d
                 _n_fc_d  = int(row.get("n_fraud_caught", 0))
@@ -755,9 +765,11 @@ with tab_sim:
                 )
                 _tint_src = f"{_n_fc_d} frodi intercettate × {_avg_sv:.4f} ETH/swap"
 
+                _oc_d = float(row.get("oracle_cost_today", 0.0))
                 st.code(
-                    f"Vbase = {_vbase_d:.0f} swap  ({_vbase_src})\n"
-                    f"Tint  = {_tint_d:.4f} ETH  ({_tint_src})\n"
+                    f"Vbase        = {_vbase_d:.0f} swap  ({_vbase_src})\n"
+                    f"Tint         = {_tint_d:.4f} ETH  ({_tint_src})\n"
+                    f"C_oracle_24h = {_oc_d:.4f} ETH  (costo oracle giorno D-1)\n"
                     f"\n"
                     f"Patt          = {_patt_d:.5f}\n"
                     f"L%            = {loss_pct:.3f}\n"
@@ -768,8 +780,11 @@ with tab_sim:
                     f"Vbase         = {_vbase_d:.0f} swap\n"
                     f"Term2         = (Tint × E/(1−E)) / Vbase             = {_term2:.6f}\n"
                     f"\n"
+                    f"C_oracle_24h  = {_oc_d:.4f} ETH\n"
+                    f"Term3         = C_oracle_24h / Vbase                 = {_term3:.6f}\n"
+                    f"\n"
                     f"──────────────────────────────────────────────────────────────\n"
-                    f"Sum           = Term1 + Term2                        = {_sum_t:.6f}\n"
+                    f"Sum           = Term1 + Term2 + Term3                = {_sum_t:.6f}\n"
                     f"Mbase         = {mbase:.3f}\n"
                     f"M_adj         = {_madj_d:.4f}\n"
                     f"M_tot         = Mbase + M_adj                        = {_mtot_d:.4f}\n"
@@ -889,7 +904,8 @@ with tab_sim:
                 e_safe   = max(min(e_d, 0.9999), 0.0001)
                 t1       = patt_d * loss_pct
                 t2       = (tint_d * (e_safe / (1.0 - e_safe))) / max(vbase_d, 1.0) if vbase_d > 0 else 0.0
-                prem_ex  = (t1 + t2) * (1 + m_tot) * _fcov_v
+                t3       = float(fr.get("term3_today", 0.0))
+                prem_ex  = (t1 + t2 + t3) * (1 + m_tot) * _fcov_v
                 n_fc     = int(fr.get("n_fraud_caught", 0))
                 n_fe     = int(fr.get("n_fraud_escaped", 0))
                 avg_sv   = float(fr.get("avg_swap_value_eth", 0.0))
@@ -910,7 +926,7 @@ with tab_sim:
                     "Frodi esc":   n_fe,
                 })
             st.dataframe(pd.DataFrame(rows_f), use_container_width=True, hide_index=True, height=300)
-            fonte("P = V × [(Patt × L%) + (Tint × E/(1−E)) / Vbase] × (1+M) × Fcov")
+            fonte("P = V × [(Patt × L%) + (Tint × E/(1−E)) / Vbase + C_oracle_24h / Vbase] × (1+M) × Fcov")
 
 
 # ==========================================================================
