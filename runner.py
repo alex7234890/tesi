@@ -134,6 +134,7 @@ def run_single(
     # Dynamic tint/vbase: computed from D-1 (start with defaults for day 0)
     vbase_prev: float = 100.0   # insured swaps from previous day
     tint_prev:  float = 0.0     # n_fraud_caught * avg_swap_value from previous day
+    oracle_cost_prev: float = 0.0  # total oracle cost from previous day (C_oracle_24h)
 
     # Oracle cost tracking
     total_oracle_cost_eth: float = 0.0
@@ -156,9 +157,10 @@ def run_single(
         m_total = pool.get_m_total()
         l_pct   = config["market"]["loss_pct_mean"]
 
-        # Dynamic tint/vbase from previous day
-        tint_today  = tint_prev
-        vbase_today = vbase_prev
+        # Dynamic tint/vbase/oracle_cost from previous day
+        tint_today          = tint_prev
+        vbase_today         = vbase_prev
+        oracle_cost_24h_today = oracle_cost_prev
 
         today_claims       = []
         today_swap_details = []
@@ -208,6 +210,7 @@ def run_single(
                 e=e_cfg,
                 vbase=vbase_today,
                 min_premium_pct=min_premium_pct,
+                oracle_cost_24h=oracle_cost_24h_today,
             )
             pool.add_premium(premium)
             pool.register_policy()
@@ -303,19 +306,21 @@ def run_single(
         prev_total_premiums = pool.total_premiums_eth
         prev_total_payouts  = pool.total_payouts_eth
 
-        # ---- Update dynamic tint/vbase for next day ----
+        # ---- Update dynamic tint/vbase/oracle_cost for next day ----
         tint_prev  = n_fraud_caught * avg_swap_value_eth
         vbase_prev = float(len(swaps))
+        oracle_cost_prev = oracle_cost_today
 
         # ---- Accumulate oracle cost ----
         total_oracle_cost_eth += oracle_cost_today
 
-        # Compute Term1/Term2 for the day (for metrics)
+        # Compute Term1/Term2/Term3 for the day (for metrics)
         _e_safe_d = max(min(e_cfg, 0.9999), 0.0001)
         _l_pct_d  = l_pct
         _term1_d  = patt * _l_pct_d
         _term2_d  = (tint_today * (_e_safe_d / (1.0 - _e_safe_d))) / max(vbase_today, 1.0) if vbase_today > 0 else 0.0
-        _prem_rate_d = (_term1_d + _term2_d) * (1.0 + m_total) * fcov_payout
+        _term3_d  = oracle_cost_24h_today / max(vbase_today, 1.0) if vbase_today > 0 else 0.0
+        _prem_rate_d = (_term1_d + _term2_d + _term3_d) * (1.0 + m_total) * fcov_payout
 
         # ---- Collect metrics ----
         collector.collect(
@@ -344,6 +349,7 @@ def run_single(
             n_oracles_used_today=n_oracles_used_today,
             term1_today=_term1_d,
             term2_today=_term2_d,
+            term3_today=_term3_d,
             premium_rate_today=_prem_rate_d,
         )
 
