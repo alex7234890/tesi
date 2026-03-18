@@ -1,5 +1,5 @@
 """
-MEV Insurance Protocol — Streamlit Dashboard (v4: UI visiva, batch avanzato, oracle, toggle mode).
+MEV Insurance Protocol — Streamlit Dashboard (v5: UI unificata, no sidebar, no tab).
 
 Avvio:
     streamlit run dashboard/app.py
@@ -36,9 +36,6 @@ _COVERAGE_FCOV     = {"Bassa": 0.70, "Media": 0.90, "Alta": 1.00}
 
 _DEX_OPTIONS = ["Uniswap V2", "Uniswap V3", "Sushiswap", "Curve"]
 
-# =========================================================================
-# Configurazione pagina
-# =========================================================================
 st.set_page_config(
     page_title="MEV Insurance Simulator",
     page_icon="🛡️",
@@ -51,7 +48,6 @@ def fonte(testo: str) -> None:
 
 
 def info_box(titolo: str, contenuto: str, colore: str = "blue") -> None:
-    """Colori: blue, green, orange, red"""
     icons  = {"blue": "ℹ️", "green": "✅", "orange": "⚠️", "red": "❌"}
     colors = {"blue": "#1f77b4", "green": "#2ca02c", "orange": "#ff7f0e", "red": "#d62728"}
     c = colors.get(colore, colors["blue"])
@@ -77,19 +73,6 @@ def _read_infura_key_from_config() -> str:
         pass
     return ""
 
-for _k, _v in [
-    ("results",    {}),
-    ("summaries",  {}),
-    ("collectors", {}),
-    ("last_mode",  2),
-    ("infura_api_key", _read_infura_key_from_config()),
-    ("confirm_clear_cache", False),
-    ("infura_last_result", None),
-    ("batch_results", None),
-]:
-    if _k not in st.session_state:
-        st.session_state[_k] = _v
-
 
 def _db_swap_count() -> int:
     if not os.path.isfile(_DB_PATH):
@@ -103,107 +86,240 @@ def _db_swap_count() -> int:
         return 0
 
 
+def _db_avg_swap_value() -> float:
+    """Valore medio swap da DB (0 se non disponibile)."""
+    if not os.path.isfile(_DB_PATH):
+        return 0.0
+    try:
+        con = sqlite3.connect(_DB_PATH, check_same_thread=False)
+        try:
+            val = con.execute("SELECT AVG(value_eth) FROM swaps").fetchone()[0]
+        except Exception:
+            val = None
+        con.close()
+        return float(val) if val else 0.0
+    except Exception:
+        return 0.0
+
+
+for _k, _v in [
+    ("results",    {}),
+    ("summaries",  {}),
+    ("collectors", {}),
+    ("last_mode",  2),
+    ("infura_api_key", _read_infura_key_from_config()),
+    ("confirm_clear_cache", False),
+    ("infura_last_result", None),
+    ("batch_results", None),
+    ("sim_seed_info", None),
+]:
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
+
 # =========================================================================
-# SIDEBAR
+# HEADER
 # =========================================================================
-st.sidebar.title("🛡️ MEV Insurance Simulator")
-st.sidebar.markdown("---")
-
-# --- Controlla disponibilità cache Infura ---
-_n_swaps_sidebar = _db_swap_count()
-_cache_exists     = _n_swaps_sidebar > 0
-
-st.sidebar.markdown("### Fonte Dati")
-if not _cache_exists:
-    st.sidebar.warning(
-        "⚠️ Nessun dato Infura in cache — simulazione completamente sintetica.\n\n"
-        "Vai alla tab **🔗 Dati Infura** per scaricare i dati reali."
-    )
-else:
-    st.sidebar.success(f"✅ DB Infura: {_n_swaps_sidebar:,} swap disponibili")
-
-use_infura_txs = st.sidebar.toggle(
-    "Usa transazioni reali da Infura",
-    value=_cache_exists,
-    disabled=not _cache_exists,
-    key="use_infura",
+st.markdown(
+    '<h1 style="margin-bottom:4px">🛡️ MEV Insurance Protocol Simulator</h1>',
+    unsafe_allow_html=True,
 )
-# Patt is always set manually — never derived from Infura
-use_infura_patt = False
+st.markdown("---")
 
-# Derive mode (1 = real txs from Infura, 2 = synthetic)
+# =========================================================================
+# SEZIONE 1 — FONTE DATI + INFURA
+# =========================================================================
+_n_swaps_db   = _db_swap_count()
+_cache_exists = _n_swaps_db > 0
+
+_col_toggle, _col_infura = st.columns([1, 3])
+
+with _col_toggle:
+    st.markdown("**Fonte Dati**")
+    use_infura_txs = st.toggle(
+        "Usa transazioni reali da Infura",
+        value=_cache_exists,
+        disabled=not _cache_exists,
+        key="use_infura",
+    )
+    if _cache_exists:
+        _avg_db = _db_avg_swap_value()
+        _avg_str = f"{_avg_db:.4f} ETH" if _avg_db > 0 else "~0.5 ETH (log-normale)"
+        st.caption(f"✅ {_n_swaps_db:,} swap in DB  \n📊 Valore medio: **{_avg_str}**")
+    else:
+        st.caption("⚠️ Nessun dato Infura — modalità sintetica")
+
+with _col_infura:
+    st.markdown("**Dati Infura** — scarica per usare transazioni reali o aggiornare il valore medio swap")
+    _ik1, _ik2, _ik3, _ik4, _ik5 = st.columns([3, 1, 1, 2, 1])
+    with _ik1:
+        _key_input = st.text_input(
+            "Project ID",
+            value=st.session_state.get("infura_api_key", ""),
+            key="infura_key_field",
+            placeholder="Project ID Infura (xxxxxxxx…)",
+            label_visibility="collapsed",
+        )
+    with _ik2:
+        _save_key_btn = st.button("💾 Salva", key="save_infura_key_btn")
+    with _ik3:
+        _block_range_days = st.number_input(
+            "Giorni", min_value=1, max_value=7, value=2,
+            key="infura_block_range", label_visibility="collapsed",
+        )
+    with _ik4:
+        _dex_targets = st.multiselect(
+            "DEX",
+            _DEX_OPTIONS, default=["Uniswap V2", "Uniswap V3"],
+            key="infura_dex_targets", label_visibility="collapsed",
+        )
+    with _ik5:
+        _key_ok = len(st.session_state.get("infura_api_key", "")) > 8
+        _dl_btn = st.button("🔄 Scarica", key="infura_download_btn",
+                            disabled=not (_key_ok and _dex_targets))
+
+    if _save_key_btn:
+        _nk = _key_input.strip()
+        if _nk:
+            import re as _re
+            _by = os.path.join(_ROOT, "config", "base.yaml")
+            try:
+                with open(_by) as _f:
+                    _cnt = _f.read()
+                _cnt = _re.sub(
+                    r'(infura_url:\s*")[^"]*(")',
+                    rf'\g<1>wss://mainnet.infura.io/ws/v3/{_nk}\2',
+                    _cnt,
+                )
+                with open(_by, "w") as _f:
+                    _f.write(_cnt)
+                st.session_state["infura_api_key"] = _nk
+                st.success("✅ Chiave salvata")
+            except Exception as _ex:
+                st.error(f"⚠️ {_ex}")
+        else:
+            st.warning("Chiave non valida.")
+
+    if _dl_btn and _key_ok and _dex_targets:
+        _iu = f"wss://mainnet.infura.io/ws/v3/{st.session_state['infura_api_key']}"
+        try:
+            from scripts.download_blocks import fetch_dex_events as _fe, save_to_db as _sd
+            _pb = st.progress(0, text="Avvio download…")
+            def _cb(p, m): _pb.progress(int(min(p, 100)), text=m)
+            _res = _fe(
+                infura_url=_iu, days=int(_block_range_days), dex_targets=_dex_targets,
+                cache_dir=os.path.join(_ROOT, "cache"), progress_cb=_cb, force_refresh=True,
+            )
+            _sd(_res, _DB_PATH)
+            _pb.progress(100, text="Completato!")
+            _m = _res["metadata"]
+            st.session_state["infura_last_result"] = {"metadata": _m}
+            st.success(f"✅ {_m['total_swaps']:,} swap scaricati | {_m['infura_calls_used']} chiamate Infura")
+            st.rerun()
+        except ImportError:
+            st.error("⚠️ `web3` non installato. `pip install web3`")
+        except Exception as _ex:
+            st.error(f"⚠️ {_ex}")
+
+use_infura_patt = False
 mode     = 1 if use_infura_txs else 2
 is_mode1 = mode == 1
 is_mode2 = mode == 2
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("### Parametri Simulazione")
+st.markdown("---")
 
-duration_days = st.sidebar.number_input(
-    "Durata simulazione (giorni)", min_value=1, max_value=365, value=30, step=1,
-    key="sim_duration",
-)
-swaps_per_day = st.sidebar.number_input(
-    "N swap/giorno (solo sintetica)", min_value=10, max_value=10000, value=100, step=10,
-    key="sim_swaps_day", disabled=is_mode1,
-)
-coverage_label = st.sidebar.selectbox(
-    "Livello di Copertura",
-    _COVERAGE_LABELS, index=2,
-    key="sim_coverage",
-    help="Bassa → 50% rimborso | Media → 70% | Alta → 100%",
-)
+# =========================================================================
+# SEZIONE 2 — PARAMETRI SIMULAZIONE
+# =========================================================================
+st.markdown("### ⚙️ Parametri Simulazione")
+
+_c1, _c2, _c3, _c4, _c5 = st.columns(5)
+
+with _c1:
+    st.markdown("**Simulazione**")
+    duration_days  = st.number_input(
+        "Durata (giorni)", min_value=1, max_value=365, value=30, step=1, key="sim_duration",
+    )
+    coverage_label = st.selectbox(
+        "Copertura", _COVERAGE_LABELS, index=2, key="sim_coverage",
+        help="Bassa → 50% rimborso | Media → 70% | Alta → 100%",
+    )
+    swaps_per_day  = st.number_input(
+        "Swap/giorno (sint.)", min_value=10, max_value=10000, value=100, step=10,
+        key="sim_swaps_day", disabled=is_mode1,
+    )
+
+with _c2:
+    st.markdown("**Rischio**")
+    patt_override = st.number_input(
+        "Patt (tasso attacco)", min_value=0.01, max_value=0.50, value=0.10,
+        step=0.01, format="%.2f", key="m2_patt_override",
+        help="Probabilità base sandwich attack. Oscilla ±30%/giorno.",
+    )
+    loss_pct = st.number_input(
+        "L% (perdita/attacco)", min_value=0.05, max_value=0.40, value=0.25,
+        step=0.01, format="%.2f", key="prot_loss_pct",
+    )
+    e_fnr = st.number_input(
+        "E — FNR", min_value=0.01, max_value=0.99, value=0.20,
+        step=0.01, format="%.2f", key="fp_e_fnr",
+        help="False Negative Rate. Usato come E/(1−E) nella formula.",
+    )
+
+with _c3:
+    st.markdown("**Protocollo**")
+    mbase = st.number_input(
+        "Mbase", min_value=0.05, max_value=0.50, value=0.15,
+        step=0.01, format="%.2f", key="prot_mbase",
+    )
+    sr_threshold_high = st.number_input(
+        "Soglia SR sano", min_value=1.30, max_value=2.00, value=1.50,
+        step=0.05, format="%.2f", key="prot_sr_high",
+        help="SR ≥ soglia → M_adj = 0",
+    )
+    sr_threshold_med = st.number_input(
+        "Soglia SR rischio", min_value=1.00, max_value=1.50, value=1.30,
+        step=0.05, format="%.2f", key="prot_sr_med",
+        help="SR < soglia → M_adj = 0.10",
+    )
+
+with _c4:
+    st.markdown("**Pool & Frodi**")
+    initial_pool_balance = st.number_input(
+        "Saldo iniziale (ETH)", min_value=10.0, max_value=10000.0, value=50.0,
+        step=10.0, key="prot_pool_balance",
+    )
+    _fraud_raw = st.number_input(
+        "Frodi sui claim (%)", min_value=0, max_value=50, value=5, step=1,
+        key="fraud_claim_pct_input",
+        help="% claim fraudolenti aggiuntivi sugli attacchi reali.",
+    )
+    fraud_claim_pct = _fraud_raw / 100.0
+    oracle_reward_per_claim = st.number_input(
+        "Oracle reward/claim (ETH)", min_value=0.0001, max_value=0.05, value=0.002,
+        step=0.0005, format="%.4f", key="oracle_reward_eth",
+    )
+
+with _c5:
+    st.markdown("**Avanzati**")
+    min_premium_pct = st.number_input(
+        "Floor premio (%)", min_value=0.001, max_value=0.10, value=0.015,
+        step=0.001, format="%.3f", key="fp_min_premium_pct",
+        help="Floor minimo premio prima di Fcov. Default 1.5%.",
+    )
+    n_synthetic_users = st.number_input(
+        "N utenti sintetici", min_value=5, max_value=500, value=50, step=5,
+        key="m2_n_users", disabled=is_mode1,
+    )
+    max_daily_swaps = st.number_input(
+        "Max swap/utente/gg", min_value=1, max_value=100, value=10, step=1,
+        key="m2_max_daily_swaps", disabled=is_mode1,
+    )
+
 coverage = _COVERAGE_INTERNAL[coverage_label]
 fcov     = _COVERAGE_FCOV[coverage_label]
 
-st.sidebar.markdown("---")
-
-with st.sidebar.expander("⚙️ Parametri Protocollo"):
-    mbase = st.slider("Margine base Mbase", 0.05, 0.50, 0.15, step=0.01, key="prot_mbase")
-    loss_pct = st.slider("L% — perdita media per attacco", 0.05, 0.40, 0.25, step=0.01, key="prot_loss_pct")
-    sr_threshold_high = st.slider("Soglia SR ALTA (sano)", 1.3, 2.0, 1.50, step=0.05, key="prot_sr_high")
-    sr_threshold_med  = st.slider("Soglia SR MEDIA (rischio)", 1.0, 1.5, 1.30, step=0.05, key="prot_sr_med")
-    initial_pool_balance = st.number_input("Saldo iniziale pool (ETH)", min_value=10.0, max_value=10000.0, value=50.0, step=10.0, key="prot_pool_balance")
-
-with st.sidebar.expander("📐 Formula Premio"):
-    e_fnr = st.slider("E — False Negative Rate (FNR)", 0.01, 0.99, 0.20, 0.01, key="fp_e_fnr",
-                      help="Tasso di falsi negativi (attacchi non rilevati). Usato come E/(1−E) nella formula.")
-    min_premium_pct = st.number_input(
-        "Floor minimo premio (% swap value)", min_value=0.001, max_value=0.10, value=0.015,
-        step=0.001, format="%.3f", key="fp_min_premium_pct",
-        help="Floor applicato PRIMA di Fcov. Se il premio calcolato è < floor×V, usa floor×V. Default 1.5%.",
-    )
-    st.caption("ℹ️ Vbase, Tint e C_oracle_24h sono calcolati automaticamente ogni giorno simulato.")
-
-with st.sidebar.expander("🚨 Parametri Frodi"):
-    fraud_claim_pct = st.slider(
-        "Percentuale frodi sui claim (%)", 0, 50, 5, step=1, key="fraud_claim_pct",
-        help="Percentuale di claim fraudolenti aggiuntivi rispetto agli attacchi reali. Es: 5% → per 50 attacchi reali, si aggiungono 2-3 claim fraudolenti.",
-    ) / 100.0
-
-with st.sidebar.expander("🔮 Oracle"):
-    oracle_reward_per_claim = st.number_input(
-        "Reward per oracle per claim (ETH)",
-        min_value=0.0001, max_value=0.05, value=0.002, step=0.0005, format="%.4f",
-        key="oracle_reward_eth",
-        help="Costo ETH pagato a ciascun oracle per ogni claim valutato",
-    )
-
-with st.sidebar.expander("🔬 Parametri Sintetica / Patt"):
-    patt_override = st.slider(
-        "Patt (tasso attacco)", 0.01, 0.50, 0.10, step=0.01, key="m2_patt_override",
-        help="Probabilità base di sandwich attack. Ogni giorno oscilla ±30%.",
-    )
-    n_synthetic_users = st.number_input("N utenti sintetici (iniziali)", min_value=5, max_value=500, value=50, step=5, key="m2_n_users", disabled=is_mode1)
-    max_daily_swaps   = st.number_input("Max swap/giorno per utente", min_value=1, max_value=100, value=10, step=1, key="m2_max_daily_swaps", disabled=is_mode1)
-
-st.sidebar.markdown("---")
-if is_mode1:
-    st.sidebar.caption("🔑 Chiave Infura nella tab **🔗 Dati Infura**")
-
-run_btn    = st.sidebar.button("▶ Avvia Simulazione", type="primary", key="run_btn")
-export_btn = st.sidebar.button("📥 Esporta CSV", key="export_btn")
-
+st.markdown("---")
 
 # =========================================================================
 # Config builder
@@ -226,7 +342,7 @@ def _build_config(
     cfg = load_config(cfg_path)
 
     run_seed = int(_time_mod.time()) % 99999
-    st.sidebar.info(f"🎲 Seed: {run_seed}")
+    st.session_state["sim_seed_info"] = run_seed
 
     cfg["simulation"]["duration_days"] = int(duration_days)
     cfg["simulation"]["seed"]          = run_seed
@@ -237,8 +353,6 @@ def _build_config(
     cfg["market"]["loss_pct_mean"] = float(loss_pct)
     cfg["market"]["e"]             = float(e_fnr)
     cfg["simulation"]["fraud_claim_pct"] = float(fraud_claim_pct)
-
-    # Patt is always set from the manual slider — regardless of data source
     cfg.setdefault("market", {})["attack_rate"] = float(patt_override)
 
     if mode == 2:
@@ -246,10 +360,7 @@ def _build_config(
         cfg["simulation"]["swaps_per_day"]  = int(swaps_per_day)
         cfg["users"]["max_daily_swaps"]     = int(max_daily_swaps)
 
-    # Oracle reward (usa nuovo nome canonico)
     cfg.setdefault("oracles", {})["oracle_reward_per_claim"] = float(oracle_reward_per_claim)
-
-    # Floor minimo premio
     cfg.setdefault("premium", {})["min_premium_pct"] = float(min_premium_pct)
 
     return cfg
@@ -293,156 +404,58 @@ def _make_cfg(**kwargs) -> dict:
 
 
 # =========================================================================
-# render_riepilogo
+# SEZIONE 3 — TIPO SIMULAZIONE
 # =========================================================================
-
-def render_riepilogo(p: dict) -> str:
-    _fcov   = _COVERAGE_FCOV[p["coverage_label"]]
-    reimb   = _COVERAGE_REIMB[p["coverage_label"]]
-    patt_ex = p["patt_override"] if p["mode"] == 2 else 0.05
-    M_total = p["mbase"]
-    _e      = float(p["e_fnr"])
-    _e_safe = max(min(_e, 0.9999), 0.0001)
-    _fcp    = float(p["fraud_claim_pct"])
-
-    _use_infura_txs  = p.get("use_infura_txs", p["mode"] == 1)
-    # Patt is always manual
-    patt_src = f"slider manuale **{p['patt_override']:.2%}** + rumore ±30%/giorno"
-
-    total_sw_est = p["duration_days"] * p["swaps_per_day"] if not _use_infura_txs else "—"
-    exp_atk_est  = int(p["duration_days"] * p["patt_override"] * p["swaps_per_day"]) if not _use_infura_txs else "—"
-
-    # Fraud example numbers (hypothetical 100 swaps)
-    ex_sw   = 100
-    ex_atk  = round(ex_sw * patt_ex)
-    ex_fr   = round(ex_atk * _fcp)
-    ex_tot  = ex_atk + ex_fr
-    ex_caught  = round(ex_fr * (1.0 - _e))
-    ex_escaped = ex_fr - ex_caught
-
-    # Data source declaration
-    if _use_infura_txs:
-        ds_block = (
-            "**Fonti dati — Reali Infura:**\n"
-            "- Swap: hash e pool reali da Infura (`eth_getLogs`)\n"
-            "- Valore swap in ETH: stimato sinteticamente (log-normale, media ~0.5 ETH)\n"
-            "- Patt: slider manuale + rumore ±30%/giorno\n"
-            "- **Vbase**: conteggio swap assicurati reali del giorno D-1 (da Infura)\n"
-            "- **Tint** (ETH): n_frodi_intercettate_{D-1} × valore_medio_swap_{D-1}\n"
-            "- **C_oracle_24h** (ETH): costo oracle totale osservato nel giorno D-1"
-        )
-    else:
-        ds_block = (
-            "**Fonti dati — Sintetica:**\n"
-            "- Swap: generati sinteticamente (Poisson con media N/giorno, seed casuale)\n"
-            "- Valore swap: log-normale (media ~0.5 ETH, σ=0.4)\n"
-            "- Patt: slider manuale + rumore ±30%/giorno\n"
-            "- **Vbase**: conteggio swap sintetici assicurati del giorno D-1\n"
-            "- **Tint** (ETH): n_frodi_intercettate_{D-1} × valore_medio_swap_{D-1}\n"
-            "- **C_oracle_24h** (ETH): costo oracle totale osservato nel giorno D-1"
-        )
-
-    return (
-        f"## 📋 Riepilogo Simulazione\n\n"
-        f"**Transazioni:** {'🔗 Reali Infura' if _use_infura_txs else '🎲 Sintetiche'} | "
-        f"**Patt:** ✏️ Manuale ({p['patt_override']:.2%}) | "
-        f"**Durata:** {p['duration_days']} giorni | "
-        f"**Copertura:** {p['coverage_label']} → rimborso {reimb}, Fcov={_fcov:.2f}\n\n"
-        "---\n\n"
-        "### Formula Premio\n\n"
-        "```\nP = V × [(Patt × L%) + (Tint × E/(1−E)) / Vbase + C_oracle_24h / Vbase] × (1 + M) × Fcov\n```\n\n"
-        "> Tint in ETH = somma valore swap delle frodi intercettate ieri  \n"
-        "> C_oracle_24h = costo oracle totale osservato nelle ultime 24h (D-1)  \n"
-        "> Vbase = numero di swap assicurati ieri\n\n"
-        f"| Parametro | Valore | Fonte |\n|---|---|---|\n"
-        f"| Patt | {patt_ex:.2%} | {patt_src} |\n"
-        f"| L% | {p['loss_pct']:.2%} | configurabile |\n"
-        f"| E (FNR) | {_e:.3f} → E/(1−E) = {_e_safe/(1-_e_safe):.4f} | configurabile |\n"
-        f"| **Vbase** | calcolato automaticamente | swap assicurati giorno D-1 |\n"
-        f"| **Tint** | calcolato automaticamente | frodi_caught_{'{D-1}'} × avg_swap_value |\n"
-        f"| **C_oracle_24h** | calcolato automaticamente | costo oracle totale giorno D-1 |\n"
-        f"| Mbase | {p['mbase']:.2%} | configurabile |\n"
-        f"| M_adj | 0.00/0.05/0.10 in base al SR | dinamico |\n"
-        f"| Fcov | {_fcov:.2f} | copertura {p['coverage_label']} |\n\n"
-        "---\n\n"
-        f"{ds_block}\n\n"
-        "---\n\n"
-        f"### Logica Frodi (fraud_claim_pct = {_fcp:.0%})\n\n"
-        f"Esempio con {ex_sw} swap totali, Patt={patt_ex:.0%}, FNR={_e:.0%}:\n\n"
-        f"```\n"
-        f"Swap totali:          {ex_sw}\n"
-        f"Attacchi reali:       {ex_sw} × {patt_ex:.0%} = {ex_atk}\n"
-        f"Frodi aggiuntive:     {ex_atk} × {_fcp:.0%} = {ex_fr}   ← fraud_claim_pct applicato\n"
-        f"Claim totali:         {ex_tot}\n"
-        f"Frodi intercettate:   {ex_fr} × {1-_e:.0%} = {ex_caught}  ← (1 - FNR)\n"
-        f"Frodi scappate:       {ex_fr} × {_e:.0%} = {ex_escaped}   ← FNR\n"
-        f"Payout reali:         {ex_atk}\n"
-        f"Payout fraudolenti:   {ex_escaped}\n"
-        f"Tint (giorno succ.):  {ex_caught} × avg_swap_value ETH\n"
-        f"```\n\n"
-        "---\n\n"
-        f"- **Rottura pool:** solo se `balance_eth < 0` (SR = solo modulatore margine)\n\n"
-        f"~**{total_sw_est}** swap | ~**{exp_atk_est}** attacchi attesi\n"
-    )
-
-
-# =========================================================================
-# Avvio simulazione
-# =========================================================================
-
-if run_btn:
-    errors = []
-    if use_infura_txs and _db_swap_count() == 0:
-        errors.append("Il database Infura è vuoto. Scarica i dati prima di usare transazioni reali.")
-    if errors:
-        for e in errors:
-            st.error(f"⚠️ {e}")
-    else:
-        cfg = _make_cfg()
-        with st.spinner("Simulazione in corso…"):
-            collector, pool, summary = run_single(cfg, mode=mode, coverage=coverage, db_path=_DB_PATH)
-            label = coverage_label
-            st.session_state["results"]    = {label: collector.to_dataframe()}
-            st.session_state["summaries"]  = {label: summary}
-            st.session_state["collectors"] = {label: collector}
-            st.session_state["last_mode"]  = mode
-        st.success("✅ Simulazione completata!")
-
-if export_btn and st.session_state["results"]:
-    frames   = [df.assign(run=lbl) for lbl, df in st.session_state["results"].items()]
-    csv_data = pd.concat(frames, ignore_index=True).to_csv(index=False).encode("utf-8")
-    st.sidebar.download_button("⬇ Scarica CSV", data=csv_data,
-        file_name="mev_risultati_simulazione.csv", mime="text/csv", key="csv_download")
-
-
-# =========================================================================
-# Area principale — 3 tab
-# =========================================================================
-st.title("🛡️ MEV Insurance Protocol Simulator")
-
-tab_sim, tab_batch, tab_infura, tab_istr = st.tabs(
-    ["📊 Simulazione", "🔁 Batch Simulazioni", "🔗 Dati Infura", "📖 Istruzioni"]
+st.markdown("### 🚀 Tipo Simulazione")
+sim_type = st.radio(
+    "Modalità simulazione",
+    ["📊 Singola", "🔁 Batch"],
+    horizontal=True,
+    key="sim_type_radio",
+    label_visibility="collapsed",
 )
 
-# ==========================================================================
-# TAB 1 — SIMULAZIONE
-# ==========================================================================
-with tab_sim:
-    st.markdown(render_riepilogo(_all_params()))
+st.markdown("---")
 
-    # --- Fonte dati visiva ---
-    _fc1, _fc2, _fc3 = st.columns(3)
-    with _fc1:
-        info_box("Transazioni",
-                 "🔗 Reali da Infura" if use_infura_txs else "🎲 Sintetiche",
-                 "green" if use_infura_txs else "orange")
-    with _fc2:
-        _patt_disp = f"{patt_override:.2%}"
-        info_box("Patt",
-                 f"🔗 Da Infura: {_patt_disp}" if use_infura_patt else f"✏️ Manuale: {_patt_disp}",
-                 "green" if use_infura_patt else "blue")
-    with _fc3:
-        info_box("Vbase/Tint/C_oracle", "📊 Calcolati automaticamente dai dati del giorno precedente", "blue")
+# ==========================================================================
+# SIMULAZIONE SINGOLA
+# ==========================================================================
+if sim_type == "📊 Singola":
+
+    _btn_col, _seed_col = st.columns([1, 3])
+    with _btn_col:
+        run_btn = st.button("▶ Avvia Simulazione", type="primary", key="run_btn")
+    with _seed_col:
+        if st.session_state.get("sim_seed_info"):
+            st.caption(f"🎲 Ultimo seed: {st.session_state['sim_seed_info']}")
+        _export_btn = st.button("📥 Esporta CSV", key="export_btn")
+
+    if run_btn:
+        errors = []
+        if use_infura_txs and _db_swap_count() == 0:
+            errors.append("Il database Infura è vuoto. Scarica i dati prima di usare transazioni reali.")
+        if errors:
+            for e in errors:
+                st.error(f"⚠️ {e}")
+        else:
+            cfg = _make_cfg()
+            with st.spinner("Simulazione in corso…"):
+                collector, pool, summary = run_single(cfg, mode=mode, coverage=coverage, db_path=_DB_PATH)
+                label = coverage_label
+                st.session_state["results"]    = {label: collector.to_dataframe()}
+                st.session_state["summaries"]  = {label: summary}
+                st.session_state["collectors"] = {label: collector}
+                st.session_state["last_mode"]  = mode
+            st.success("✅ Simulazione completata!")
+
+    if _export_btn and st.session_state["results"]:
+        frames   = [df.assign(run=lbl) for lbl, df in st.session_state["results"].items()]
+        csv_data = pd.concat(frames, ignore_index=True).to_csv(index=False).encode("utf-8")
+        st.download_button(
+            "⬇ Scarica CSV", data=csv_data,
+            file_name="mev_risultati_simulazione.csv", mime="text/csv",
+            key="csv_download_top",
+        )
 
     results    = st.session_state["results"]
     summaries  = st.session_state["summaries"]
@@ -451,10 +464,10 @@ with tab_sim:
     if not results:
         if use_infura_txs and _db_swap_count() == 0:
             info_box("Dati mancanti",
-                     "Scarica prima i dati nella tab 🔗 Dati Infura, oppure disabilita "
+                     "Scarica prima i dati Infura (sezione sopra) oppure disabilita "
                      "il toggle <b>Usa transazioni reali da Infura</b>.", "orange")
         else:
-            st.info("Configura i parametri nella sidebar e premi **▶ Avvia Simulazione**.")
+            st.info("Configura i parametri e premi **▶ Avvia Simulazione**.")
     else:
         first_label     = next(iter(results))
         first_df        = results[first_label]
@@ -462,19 +475,22 @@ with tab_sim:
         first_collector = collectors.get(first_label)
         last_mode       = st.session_state.get("last_mode", 2)
 
-        st.markdown("---")
+        _bd = first_summary.get("breakdown_event")
 
-        # ---- Metriche chiave ----
+        st.markdown("---")
         st.subheader("📈 Risultati")
+
         c0, c1, c2, c3 = st.columns(4)
         c0.metric("Profitto totale (ETH)", f"{first_summary['total_profit_eth']:.4f}")
         c1.metric("SR finale",             f"{first_summary['final_solvency_ratio']:.3f}")
         c2.metric("Saldo finale (ETH)",    f"{first_summary['final_balance_eth']:.4f}")
         c3.metric("Pool sopravvissuto",    "SÌ ✓" if first_summary["pool_survived"] else "NO ✗")
 
-        _bd = first_summary.get("breakdown_event")
         if _bd:
-            st.error(f"💥 **Pool esaurito al giorno {_bd['day']}** — {_bd['reason']}\n\nSaldo: {_bd['pool_balance']:.4f} ETH")
+            st.error(
+                f"💥 **Pool esaurito al giorno {_bd['day']}** — {_bd['reason']}\n\n"
+                f"Saldo: {_bd['pool_balance']:.4f} ETH"
+            )
         else:
             st.success("✅ Il pool ha superato l'intera simulazione senza rotture.")
 
@@ -489,8 +505,10 @@ with tab_sim:
             "day", "pool_balance_eth", "pending_liabilities_eth",
             "solvency_ratio", "madj_current", "net_flow_today",
         ]].copy()
-        pool_df.columns = ["Giorno", "Saldo Pool (ETH)", "Passività Pendenti (ETH)",
-                           "Solvency Ratio", "M_adj", "Variazione Netta (ETH)"]
+        pool_df.columns = [
+            "Giorno", "Saldo Pool (ETH)", "Passività Pendenti (ETH)",
+            "Solvency Ratio", "M_adj", "Variazione Netta (ETH)",
+        ]
 
         def _get_stato(row):
             d   = int(row["Giorno"])
@@ -525,8 +543,11 @@ with tab_sim:
 
         st.dataframe(
             pool_df.style
-            .format({"Saldo Pool (ETH)": "{:.4f}", "Passività Pendenti (ETH)": "{:.4f}",
-                     "Solvency Ratio": "{:.4f}", "M_adj": "{:.2f}", "Variazione Netta (ETH)": "{:+.4f}"})
+            .format({
+                "Saldo Pool (ETH)": "{:.4f}", "Passività Pendenti (ETH)": "{:.4f}",
+                "Solvency Ratio": "{:.4f}", "M_adj": "{:.2f}",
+                "Variazione Netta (ETH)": "{:+.4f}",
+            })
             .applymap(_color_net, subset=["Variazione Netta (ETH)"])
             .apply(_highlight_bd, axis=1),
             use_container_width=True, height=300,
@@ -564,14 +585,16 @@ with tab_sim:
 
         last = first_df.iloc[-1]
         ca, cb, cc = st.columns(3)
-        ca.metric("Premi Totali (ETH)",  f"{float(last['total_premiums_collected_eth']):.4f}")
-        cb.metric("Payout Totali (ETH)", f"{float(last['total_payouts_eth']):.4f}")
-        cc.metric("Profitto Netto (ETH)",f"{float(last['profit_eth']):.4f}")
+        ca.metric("Premi Totali (ETH)",   f"{float(last['total_premiums_collected_eth']):.4f}")
+        cb.metric("Payout Totali (ETH)",  f"{float(last['total_payouts_eth']):.4f}")
+        cc.metric("Profitto Netto (ETH)", f"{float(last['profit_eth']):.4f}")
 
-        cf_df = first_df[["day","premiums_today","payouts_today","net_flow_today"]].copy()
-        cf_df.columns = ["Giorno","Premi Oggi (ETH)","Payout Oggi (ETH)","Flusso Netto (ETH)"]
-        st.dataframe(cf_df.style.format({c: "{:.4f}" for c in cf_df.columns if c != "Giorno"}),
-                     use_container_width=True, height=250)
+        cf_df = first_df[["day", "premiums_today", "payouts_today", "net_flow_today"]].copy()
+        cf_df.columns = ["Giorno", "Premi Oggi (ETH)", "Payout Oggi (ETH)", "Flusso Netto (ETH)"]
+        st.dataframe(
+            cf_df.style.format({c: "{:.4f}" for c in cf_df.columns if c != "Giorno"}),
+            use_container_width=True, height=250,
+        )
 
         st.markdown("---")
 
@@ -587,10 +610,12 @@ with tab_sim:
         ce2.metric("Claim approvati",      str(tot_app))
         ce3.metric("Payout medio (ETH)",   f"{avg_pay:.4f}" if not np.isnan(avg_pay) else "N/A")
 
-        cl_df = first_df[["day","n_claims_submitted","n_claims_approved","avg_payout_eth"]].copy()
-        cl_df.columns = ["Giorno","Claim Inviati","Claim Approvati","Payout Medio (ETH)"]
-        st.dataframe(cl_df.style.format({"Payout Medio (ETH)": "{:.4f}"}),
-                     use_container_width=True, height=250)
+        cl_df = first_df[["day", "n_claims_submitted", "n_claims_approved", "avg_payout_eth"]].copy()
+        cl_df.columns = ["Giorno", "Claim Inviati", "Claim Approvati", "Payout Medio (ETH)"]
+        st.dataframe(
+            cl_df.style.format({"Payout Medio (ETH)": "{:.4f}"}),
+            use_container_width=True, height=250,
+        )
 
         # ---- Pannello 4: Utenti (solo sintetica) ----
         if last_mode == 2:
@@ -598,9 +623,9 @@ with tab_sim:
             st.subheader("4 — Distribuzione Utenti")
             fonte("Utenti sintetici da SyntheticDataSource — solo simulazione sintetica")
 
-            _ud_cols = [c for c in ["day","n_users_active"] if c in first_df.columns]
+            _ud_cols = [c for c in ["day", "n_users_active"] if c in first_df.columns]
             ud_df = first_df[_ud_cols].copy()
-            ud_df.columns = ["Giorno","Utenti Attivi"][:len(_ud_cols)]
+            ud_df.columns = ["Giorno", "Utenti Attivi"][:len(_ud_cols)]
             st.dataframe(ud_df, use_container_width=True, height=250)
 
         # ---- Flussi Economici ----
@@ -615,7 +640,7 @@ with tab_sim:
         ref        = max(premi_tot, 1e-9)
 
         eco_df = pd.DataFrame({
-            "Voce": ["Premi incassati","Payout erogati","Profitto netto","Saldo finale"],
+            "Voce": ["Premi incassati", "Payout erogati", "Profitto netto", "Saldo finale"],
             "Importo (ETH)": [premi_tot, payout_tot, profit_tot, saldo_fin],
         })
         eco_df["% dei premi"] = eco_df["Importo (ETH)"].apply(lambda x: f"{abs(x)/ref*100:.1f}%")
@@ -623,10 +648,10 @@ with tab_sim:
         st.dataframe(eco_df, use_container_width=True, hide_index=True)
         fonte("InsurancePool — cumulativo al termine della simulazione")
 
-        base_risk   = (patt_override if is_mode2 else 0.05) * loss_pct
-        prem_ex2    = base_risk * (1 + mbase) * fcov
-        atk_frac    = base_risk * fcov / prem_ex2 * 100 if prem_ex2 > 0 else 0
-        marg_frac   = base_risk * mbase * fcov / prem_ex2 * 100 if prem_ex2 > 0 else 0
+        base_risk = (patt_override if is_mode2 else 0.05) * loss_pct
+        prem_ex2  = base_risk * (1 + mbase) * fcov
+        atk_frac  = base_risk * fcov / prem_ex2 * 100 if prem_ex2 > 0 else 0
+        marg_frac = base_risk * mbase * fcov / prem_ex2 * 100 if prem_ex2 > 0 else 0
         st.markdown(
             f"**Su ogni ETH di premio:** ~{atk_frac:.1f}% copre rischio attacchi | "
             f"~{marg_frac:.1f}% è margine\n"
@@ -639,8 +664,10 @@ with tab_sim:
 
         _bd6_day = _bd["day"] if _bd else None
         max_day  = int(first_df["day"].max())
-        selected_day = st.slider("Seleziona giorno", min_value=0, max_value=max_day,
-                                  value=_bd6_day if _bd6_day else 0, step=1, key="day_explorer_slider")
+        selected_day = st.slider(
+            "Seleziona giorno", min_value=0, max_value=max_day,
+            value=_bd6_day if _bd6_day else 0, step=1, key="day_explorer_slider",
+        )
 
         if _bd6_day is not None and selected_day == _bd6_day:
             st.error(f"💥 **GIORNO DI ROTTURA** — {_bd['reason']} | Saldo: {_bd['pool_balance']:.4f} ETH")
@@ -650,38 +677,29 @@ with tab_sim:
         row = first_df[first_df["day"] == selected_day]
         if not row.empty:
             row = row.iloc[0]
-            # ---- Full breakdown table ----
-            n_sw      = int(row.get("n_swaps_this_tick", 0))
-            n_ra      = int(row.get("n_real_attacks", 0))
-            n_fc      = int(row.get("n_fraud_caught", 0))
-            n_fe      = int(row.get("n_fraud_escaped", 0))
-            n_normal  = max(n_sw - n_ra - n_fc - n_fe, 0)
-            net       = float(row.get("net_flow_today", 0.0))
-            pr_today  = float(row.get("payout_real_today", 0.0))
-            pf_today  = float(row.get("payout_fraud_today", 0.0))
-            tint_d    = float(row.get("tint_today", 0.0))
-            vbase_d   = float(row.get("vbase_today", 100.0))
-            oc_today  = float(row.get("oracle_cost_today", 0.0))
+            n_sw     = int(row.get("n_swaps_this_tick", 0))
+            n_ra     = int(row.get("n_real_attacks", 0))
+            n_fc     = int(row.get("n_fraud_caught", 0))
+            n_fe     = int(row.get("n_fraud_escaped", 0))
+            n_normal = max(n_sw - n_ra - n_fc - n_fe, 0)
+            net      = float(row.get("net_flow_today", 0.0))
+            pr_today = float(row.get("payout_real_today", 0.0))
+            pf_today = float(row.get("payout_fraud_today", 0.0))
+            tint_d   = float(row.get("tint_today", 0.0))
+            vbase_d  = float(row.get("vbase_today", 100.0))
+            oc_today = float(row.get("oracle_cost_today", 0.0))
             nor_today = int(row.get("n_oracles_used_today", 0))
+
             st.dataframe(pd.DataFrame({
                 "Metrica": [
-                    "Swap totali",
-                    "  — normali",
-                    "  — attacchi reali",
-                    "  — frodi intercettate",
-                    "  — frodi scappate",
-                    "Premi incassati (tutti)",
-                    "Payout erogati",
-                    "    da attacchi reali",
-                    "    da frodi scappate",
-                    "Costo oracle totale oggi",
-                    "  — oracle utilizzati",
-                    "Tint (frodi intercettate × avg_swap)",
-                    "Vbase (swap ieri)",
-                    "Variazione netta pool",
-                    "Saldo pool",
-                    "Solvency Ratio (solo per M_adj)",
-                    "M_adj applicato oggi",
+                    "Swap totali", "  — normali", "  — attacchi reali",
+                    "  — frodi intercettate", "  — frodi scappate",
+                    "Premi incassati (tutti)", "Payout erogati",
+                    "    da attacchi reali", "    da frodi scappate",
+                    "Costo oracle totale oggi", "  — oracle utilizzati",
+                    "Tint (frodi intercettate × avg_swap)", "Vbase (swap ieri)",
+                    "Variazione netta pool", "Saldo pool",
+                    "Solvency Ratio (solo per M_adj)", "M_adj applicato oggi",
                 ],
                 "Valore": [
                     str(n_sw),
@@ -701,27 +719,25 @@ with tab_sim:
                     f"{float(row['pool_balance_eth']):.4f} ETH",
                     f"{float(row['solvency_ratio']):.4f}",
                     f"{float(row.get('madj_current',0)):.4f}",
-                ]
+                ],
             }), use_container_width=True, hide_index=True)
 
-            # ---- Term1 / Term2 / Term3 visual section ----
+            # ---- Term1 / Term2 / Term3 ----
             st.markdown("#### 📐 Term1, Term2 e Term3 del Giorno")
-            _t1_vis = float(row.get("patt_current", 0.0)) * float(row.get("loss_pct_current", loss_pct))
-            _e_vis  = float(row.get("e_today", e_fnr))
-            _e_vis  = max(min(_e_vis, 0.9999), 0.0001)
-            _tint_vis  = float(row.get("tint_today", 0.0))
-            _vbase_vis = float(row.get("vbase_today", 100.0))
-            _t2_vis = (_tint_vis * (_e_vis / (1.0 - _e_vis))) / max(_vbase_vis, 1.0) if _vbase_vis > 0 else 0.0
-            _t3_vis = float(row.get("term3_today", 0.0))
-            _madj_vis = float(row.get("madj_current", 0.0))
+            _t1_vis   = float(row.get("patt_current", 0.0)) * float(row.get("loss_pct_current", loss_pct))
+            _e_vis    = max(min(float(row.get("e_today", e_fnr)), 0.9999), 0.0001)
+            _tint_vis = float(row.get("tint_today", 0.0))
+            _vbase_vis= float(row.get("vbase_today", 100.0))
+            _t2_vis   = (_tint_vis * (_e_vis / (1.0 - _e_vis))) / max(_vbase_vis, 1.0) if _vbase_vis > 0 else 0.0
+            _t3_vis   = float(row.get("term3_today", 0.0))
             _mtot_vis = float(row.get("m_total_current", mbase))
             _rate_vis = (_t1_vis + _t2_vis + _t3_vis) * (1.0 + _mtot_vis) * fcov * 100.0
             _cv1, _cv2, _cv3, _cv4 = st.columns(4)
             _cv1.metric("Term1 (Patt × L%)", f"{_t1_vis:.4f}", help="Rischio attacchi reali")
             _cv2.metric("Term2 (frodi non rilevate)", f"{_t2_vis:.4f}", help="Costo frodi che sfuggono al rilevamento")
-            _cv3.metric("Term3 (costi operativi oracle)", f"{_t3_vis:.4f}", help="C_oracle_24h / Vbase")
+            _cv3.metric("Term3 (costi oracle)", f"{_t3_vis:.4f}", help="C_oracle_24h / Vbase")
             _cv4.metric("Premio medio applicato", f"{_rate_vis:.3f}%", help="% del valore swap pagata come premio")
-            _tot_vis = _t1_vis + _t2_vis + _t3_vis if (_t1_vis + _t2_vis + _t3_vis) > 0 else 1e-9
+            _tot_vis = (_t1_vis + _t2_vis + _t3_vis) or 1e-9
             _pct1_vis = _t1_vis / _tot_vis * 100
             _pct2_vis = _t2_vis / _tot_vis * 100
             _pct3_vis = _t3_vis / _tot_vis * 100
@@ -737,7 +753,7 @@ with tab_sim:
                 unsafe_allow_html=True,
             )
 
-            # ---- Formula breakdown for selected day ----
+            # ---- Formula breakdown per giorno selezionato ----
             with st.expander("📐 Formula Premio — Calcolo del Giorno", expanded=False):
                 _patt_d  = float(row.get("patt_current", 0.0))
                 _tint_d  = float(row.get("tint_today", 0.0))
@@ -751,36 +767,24 @@ with tab_sim:
                 _term2   = (_tint_d * _e_ratio) / max(_vbase_d, 1.0) if _vbase_d > 0 else 0.0
                 _term3   = float(row.get("term3_today", 0.0))
                 _sum_t   = _term1 + _term2 + _term3
-                _fcov_d  = fcov
-                _ex_prem = 1.0 * _sum_t * (1.0 + _mtot_d) * _fcov_d
+                _ex_prem = 1.0 * _sum_t * (1.0 + _mtot_d) * fcov
                 _n_fc_d  = int(row.get("n_fraud_caught", 0))
                 _avg_sv  = float(row.get("avg_swap_value_eth", 0.0))
                 _n_fe_d  = int(row.get("n_fraud_escaped", 0))
-
-                _mode_lbl = last_mode
-                _vbase_src = (
-                    "swap assicurati ieri — da Infura"
-                    if _mode_lbl == 1 else
-                    "swap sintetici assicurati ieri"
-                )
-                _tint_src = f"{_n_fc_d} frodi intercettate × {_avg_sv:.4f} ETH/swap"
-
-                _oc_d = float(row.get("oracle_cost_today", 0.0))
+                _oc_d    = float(row.get("oracle_cost_today", 0.0))
+                _vb_src  = "swap assicurati ieri — da Infura" if last_mode == 1 else "swap sintetici assicurati ieri"
                 st.code(
-                    f"Vbase        = {_vbase_d:.0f} swap  ({_vbase_src})\n"
-                    f"Tint         = {_tint_d:.4f} ETH  ({_tint_src})\n"
+                    f"Vbase        = {_vbase_d:.0f} swap  ({_vb_src})\n"
+                    f"Tint         = {_tint_d:.4f} ETH  ({_n_fc_d} frodi × {_avg_sv:.4f} ETH/swap)\n"
                     f"C_oracle_24h = {_oc_d:.4f} ETH  (costo oracle giorno D-1)\n"
                     f"\n"
                     f"Patt          = {_patt_d:.5f}\n"
                     f"L%            = {loss_pct:.3f}\n"
                     f"Term1         = Patt × L%                           = {_term1:.6f}\n"
                     f"\n"
-                    f"Tint (ETH)    = {_tint_d:.4f}\n"
                     f"E (FNR)       = {_e_d:.3f}  →  E/(1−E)             = {_e_ratio:.4f}\n"
-                    f"Vbase         = {_vbase_d:.0f} swap\n"
                     f"Term2         = (Tint × E/(1−E)) / Vbase             = {_term2:.6f}\n"
                     f"\n"
-                    f"C_oracle_24h  = {_oc_d:.4f} ETH\n"
                     f"Term3         = C_oracle_24h / Vbase                 = {_term3:.6f}\n"
                     f"\n"
                     f"──────────────────────────────────────────────────────────────\n"
@@ -788,9 +792,9 @@ with tab_sim:
                     f"Mbase         = {mbase:.3f}\n"
                     f"M_adj         = {_madj_d:.4f}\n"
                     f"M_tot         = Mbase + M_adj                        = {_mtot_d:.4f}\n"
-                    f"Fcov          = {_fcov_d:.2f}  ({coverage_label})\n"
+                    f"Fcov          = {fcov:.2f}  ({coverage_label})\n"
                     f"──────────────────────────────────────────────────────────────\n"
-                    f"Esempio 1 ETH: P = 1 × {_sum_t:.6f} × (1 + {_mtot_d:.4f}) × {_fcov_d:.2f}\n"
+                    f"Esempio 1 ETH: P = 1 × {_sum_t:.6f} × (1 + {_mtot_d:.4f}) × {fcov:.2f}\n"
                     f"             = {_ex_prem:.6f} ETH\n"
                     f"\n"
                     f"Frodi oggi:   {int(row.get('n_fraud_attempts',0))} tentativi "
@@ -800,9 +804,9 @@ with tab_sim:
 
             if first_collector:
                 day_swaps = first_collector.daily_swap_details.get(selected_day, [])
-                _n_real   = sum(1 for d in day_swaps if d.get("tipo_claim") == "reale")
-                _n_fi     = sum(1 for d in day_swaps if d.get("tipo_claim") == "frode_intercettata")
-                _n_fs     = sum(1 for d in day_swaps if d.get("tipo_claim") == "frode_scappata")
+                _n_real = sum(1 for d in day_swaps if d.get("tipo_claim") == "reale")
+                _n_fi   = sum(1 for d in day_swaps if d.get("tipo_claim") == "frode_intercettata")
+                _n_fs   = sum(1 for d in day_swaps if d.get("tipo_claim") == "frode_scappata")
                 with st.expander(
                     f"Swap del giorno {selected_day} "
                     f"({len(day_swaps)} righe: {_n_real} reali, {_n_fi} frodi_catch, {_n_fs} frodi_esc)",
@@ -810,19 +814,13 @@ with tab_sim:
                 ):
                     if day_swaps:
                         sw_df = pd.DataFrame(day_swaps)
-                        # Rename columns for display
                         col_rename = {
-                            "swap_id":      "Swap ID",
-                            "value_ETH":    "Valore (ETH)",
-                            "was_attacked": "Attaccato",
-                            "coverage_level": "Copertura",
-                            "premium_paid": "Premio (ETH)",
-                            "premium_pct":  "Premio (%)",
-                            "claim_submitted": "Claim?",
-                            "claim_approved":  "Approvato?",
-                            "payout_ETH":   "Rimborso (ETH)",
-                            "rimborso_pct": "Rimborso (%)",
-                            "tipo_claim":   "Tipo Claim",
+                            "swap_id": "Swap ID", "value_ETH": "Valore (ETH)",
+                            "was_attacked": "Attaccato", "coverage_level": "Copertura",
+                            "premium_paid": "Premio (ETH)", "premium_pct": "Premio (%)",
+                            "claim_submitted": "Claim?", "claim_approved": "Approvato?",
+                            "payout_ETH": "Rimborso (ETH)", "rimborso_pct": "Rimborso (%)",
+                            "tipo_claim": "Tipo Claim",
                         }
                         sw_disp = sw_df[[c for c in col_rename if c in sw_df.columns]].rename(columns=col_rename)
                         for cn in ("Valore (ETH)", "Premio (ETH)", "Rimborso (ETH)"):
@@ -844,72 +842,34 @@ with tab_sim:
         with st.expander("📊 Dati grezzi simulazione", expanded=False):
             _brd = first_df.copy()
             def _st_full(r):
-                d, bal = int(r["day"]), float(r.get("pool_balance_eth",0))
+                d, bal = int(r["day"]), float(r.get("pool_balance_eth", 0))
                 if _bd6_day and d == _bd6_day: return "💥 ROTTURA"
                 elif _bd6_day and d > _bd6_day: return "⚠️ post-rottura"
                 elif bal < 0: return "🔴 saldo negativo"
-                elif float(r.get("solvency_ratio",1.5)) < 1.3: return "🟠 rischio medio"
+                elif float(r.get("solvency_ratio", 1.5)) < 1.3: return "🟠 rischio medio"
                 else: return "🟢 sano"
             _brd.insert(1, "Stato", _brd.apply(_st_full, axis=1))
             st.dataframe(_brd, use_container_width=True)
 
-        st.markdown("---")
-        st.subheader("📁 Tutti i Dati")
-
-        with st.expander("📋 Parametri usati", expanded=False):
-            _p = _all_params()
-            rows = [
-                ("Transazioni", "Reali Infura" if _p.get("use_infura_txs", _p["mode"]==1) else "Sintetiche"),
-                ("Patt", "Manuale (slider)"),
-                ("Durata (giorni)", _p["duration_days"]),
-                ("Copertura", f"{_p['coverage_label']} (Fcov={_COVERAGE_FCOV[_p['coverage_label']]:.2f})"),
-                ("Mbase", f"{_p['mbase']:.2%}"), ("L%", f"{_p['loss_pct']:.2%}"),
-                ("Soglia SR Alta", _p["sr_threshold_high"]), ("Soglia SR Media", _p["sr_threshold_med"]),
-                ("Pool iniziale (ETH)", _p["initial_pool_balance"]),
-                ("E (FNR)", f"{_p['e_fnr']:.3f}"),
-                ("Frodi/claim (%)", f"{_p['fraud_claim_pct']:.1%}"),
-                ("Vbase", "auto — swap assicurati D-1"),
-                ("Tint", "auto — frodi_caught_{D-1} × avg_swap_value"),
-            ]
-            if _p["mode"] == 2:
-                rows += [
-                    ("Patt manuale", f"{_p['patt_override']:.2%}"),
-                    ("Swap/giorno", _p["swaps_per_day"]),
-                    ("N utenti", _p["n_synthetic_users"]),
-                    ("Max swap/utente/giorno", _p["max_daily_swaps"]),
-                    ("Seed", "auto (time-based)"),
-                ]
-            if _p["mode"] == 1:
-                rows.append(("Patt manuale (Infura mode)", f"{_p['patt_override']:.2%}"))
-            st.dataframe(pd.DataFrame(rows, columns=["Parametro","Valore"]),
-                         use_container_width=True, hide_index=True)
-
-        with st.expander("⬇️ Scarica CSV completo", expanded=False):
-            _csv = first_df.to_csv(index=False).encode("utf-8")
-            st.download_button("📥 Scarica CSV", data=_csv,
-                               file_name="mev_simulazione.csv", mime="text/csv", key="csv_full_download")
-            st.caption(f"{len(first_df)} righe × {len(first_df.columns)} colonne")
-
         with st.expander("📐 Formula per giorno", expanded=False):
             _fcov_v = _COVERAGE_FCOV[coverage_label]
             rows_f  = []
-            _mode_l = last_mode
             for _, fr in first_df.iterrows():
-                patt_d   = float(fr.get("patt_current", 0.05))
-                madj_d   = float(fr.get("madj_current", 0.0))
-                m_tot    = mbase + madj_d
-                tint_d   = float(fr.get("tint_today", 0.0))
-                vbase_d  = float(fr.get("vbase_today", 100.0))
-                e_d      = float(fr.get("e_today", e_fnr))
-                e_safe   = max(min(e_d, 0.9999), 0.0001)
-                t1       = patt_d * loss_pct
-                t2       = (tint_d * (e_safe / (1.0 - e_safe))) / max(vbase_d, 1.0) if vbase_d > 0 else 0.0
-                t3       = float(fr.get("term3_today", 0.0))
-                prem_ex  = (t1 + t2 + t3) * (1 + m_tot) * _fcov_v
-                n_fc     = int(fr.get("n_fraud_caught", 0))
-                n_fe     = int(fr.get("n_fraud_escaped", 0))
-                avg_sv   = float(fr.get("avg_swap_value_eth", 0.0))
-                _vb_src  = "Infura D-1" if (_mode_l == 1) else "sintetico D-1"
+                patt_d  = float(fr.get("patt_current", 0.05))
+                madj_d  = float(fr.get("madj_current", 0.0))
+                m_tot   = mbase + madj_d
+                tint_d  = float(fr.get("tint_today", 0.0))
+                vbase_d = float(fr.get("vbase_today", 100.0))
+                e_d     = float(fr.get("e_today", e_fnr))
+                e_safe  = max(min(e_d, 0.9999), 0.0001)
+                t1      = patt_d * loss_pct
+                t2      = (tint_d * (e_safe / (1.0 - e_safe))) / max(vbase_d, 1.0) if vbase_d > 0 else 0.0
+                t3      = float(fr.get("term3_today", 0.0))
+                prem_ex = (t1 + t2 + t3) * (1 + m_tot) * _fcov_v
+                n_fc    = int(fr.get("n_fraud_caught", 0))
+                n_fe    = int(fr.get("n_fraud_escaped", 0))
+                avg_sv  = float(fr.get("avg_swap_value_eth", 0.0))
+                _vb_src = "Infura D-1" if (last_mode == 1) else "sintetico D-1"
                 rows_f.append({
                     "Giorno":     int(fr["day"]),
                     "Patt":       f"{patt_d:.3%}",
@@ -928,26 +888,40 @@ with tab_sim:
             st.dataframe(pd.DataFrame(rows_f), use_container_width=True, hide_index=True, height=300)
             fonte("P = V × [(Patt × L%) + (Tint × E/(1−E)) / Vbase + C_oracle_24h / Vbase] × (1+M) × Fcov")
 
+        with st.expander("⬇️ Scarica CSV completo", expanded=False):
+            _csv = first_df.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "📥 Scarica CSV", data=_csv,
+                file_name="mev_simulazione.csv", mime="text/csv",
+                key="csv_full_download",
+            )
+            st.caption(f"{len(first_df)} righe × {len(first_df.columns)} colonne")
+
 
 # ==========================================================================
+# BATCH SIMULAZIONI
 # ==========================================================================
-# TAB 2 — BATCH SIMULAZIONI
-# ==========================================================================
-with tab_batch:
+elif sim_type == "🔁 Batch":
+
     st.subheader("🔁 Batch Simulazioni")
-    st.markdown("Esegui N simulazioni variando i parametri con prodotto cartesiano. Analizza la distribuzione.")
+    st.markdown("Esegui N simulazioni variando i parametri con prodotto cartesiano.")
 
     b1, b2 = st.columns([1, 2])
     with b1:
-        _bn_steps = st.number_input("Passi per parametro", min_value=2, max_value=100, value=5, step=1, key="batch_n_steps",
-                                     help="N valori equidistanti per ogni parametro in modalità Range")
+        _bn_steps = st.number_input(
+            "Passi per parametro", min_value=2, max_value=100, value=5, step=1,
+            key="batch_n_steps",
+            help="N valori equidistanti per ogni parametro in modalità Range",
+        )
         _runs_per_step = st.number_input(
             "Runs per passo (media)", min_value=1, max_value=50, value=1, step=1,
             key="batch_runs_per_step",
-            help="Se > 1, ogni combinazione viene eseguita N volte con seed distinti e i risultati vengono mediati. "
-                 "pool_survived diventa pool_survival_rate (0–1).",
+            help="Se > 1, ogni combinazione viene eseguita N volte e i risultati vengono mediati.",
         )
-        _b_use_real = st.toggle("Usa transazioni Infura", value=_cache_exists, disabled=not _cache_exists, key="batch_use_infura")
+        _b_use_real = st.toggle(
+            "Usa transazioni Infura", value=_cache_exists,
+            disabled=not _cache_exists, key="batch_use_infura",
+        )
         _b_mode = 1 if _b_use_real else 2
     with b2:
         _b_params = st.multiselect(
@@ -957,11 +931,10 @@ with tab_batch:
             key="batch_vars",
         )
 
-    # Per-parameter range config
     _b_param_config: dict = {}
     if _b_params:
         st.markdown("**Range per parametro variabile:**")
-        _pc_cols = st.columns(min(len(_b_params), 3))
+        _pc_cols = st.columns(min(len(_b_params), 4))
         _bp_defaults = {
             "Patt":          (0.02, 0.20),
             "L%":            (0.05, 0.40),
@@ -975,11 +948,16 @@ with tab_batch:
         for _bi, _bp in enumerate(_b_params):
             with _pc_cols[_bi % len(_pc_cols)]:
                 st.markdown(f"*{_bp}*")
-                _bmode_p = st.selectbox("Modalità", ["Range lineare", "Casuale nel range", "Fisso"],
-                                        key=f"batch_pmode_{_bi}")
+                _bmode_p = st.selectbox(
+                    "Modalità", ["Range lineare", "Casuale nel range", "Fisso"],
+                    key=f"batch_pmode_{_bi}",
+                )
                 _def_min, _def_max = _bp_defaults.get(_bp, (0.01, 0.50))
                 if _bmode_p == "Fisso":
-                    _bfv = st.number_input("Valore fisso", value=round((_def_min+_def_max)/2, 4), key=f"batch_fixed_{_bi}")
+                    _bfv = st.number_input(
+                        "Valore fisso", value=round((_def_min+_def_max)/2, 4),
+                        key=f"batch_fixed_{_bi}",
+                    )
                     _b_param_config[_bp] = {"mode": "fixed", "value": float(_bfv)}
                 else:
                     _bmin = st.number_input("Min", value=_def_min, key=f"batch_min_{_bi}")
@@ -989,7 +967,6 @@ with tab_batch:
                         "min": float(_bmin), "max": float(_bmax),
                     }
 
-    # Compute total combinations
     def _batch_combos(pcfg: dict, n_steps: int) -> list:
         pv = {}
         for name, cfg in pcfg.items():
@@ -997,58 +974,35 @@ with tab_batch:
                 pv[name] = [cfg["value"]]
             elif cfg["mode"] == "range":
                 pv[name] = list(np.linspace(cfg["min"], cfg["max"], n_steps))
-            else:  # random
+            else:
                 pv[name] = list(np.random.uniform(cfg["min"], cfg["max"], n_steps))
-        keys = list(pv.keys())
+        keys   = list(pv.keys())
         combos = list(_itertools_product(*[pv[k] for k in keys]))
         return [dict(zip(keys, c)) for c in combos]
 
-    _total_combos = len(_batch_combos(_b_param_config, int(_bn_steps))) if _b_param_config else int(_bn_steps)
-
-    # --- Riepilogo configurazione batch ---
+    _total_combos    = len(_batch_combos(_b_param_config, int(_bn_steps))) if _b_param_config else int(_bn_steps)
     _total_runs_batch = _total_combos * int(_runs_per_step)
-    with st.expander("📋 Riepilogo configurazione batch", expanded=True):
-        _b_patt_mode  = _b_param_config.get("Patt",  {}).get("mode", "—")
-        _b_fnr_mode   = _b_param_config.get("E (FNR)", {}).get("mode", "—")
-        _b_mbase_mode = _b_param_config.get("Mbase",  {}).get("mode", "fisso")
-        _b_fraud_mode = _b_param_config.get("Frodi%", {}).get("mode", "—")
-        _b_orc_mode   = _b_param_config.get("Oracle reward", {}).get("mode", "—")
-        _b_minp_mode  = _b_param_config.get("Min premio%", {}).get("mode", "—")
-        st.markdown(f"""
-| Parametro | Valore base | Variazione |
-|-----------|------------|-----------|
-| Passi per parametro | {_bn_steps} | — |
-| Runs per passo | {_runs_per_step} | — |
-| Patt | {patt_override:.3f} | {_b_patt_mode} |
-| E (FNR) | {e_fnr:.2f} | {_b_fnr_mode} |
-| Mbase | {mbase:.2f} | {_b_mbase_mode} |
-| Frodi% | {fraud_claim_pct:.2f} | {_b_fraud_mode} |
-| Oracle reward | {oracle_reward_per_claim:.4f} ETH | {_b_orc_mode} |
-| Min premio% | {min_premium_pct:.3f} | {_b_minp_mode} |
-| Pool iniziale | {initial_pool_balance:.1f} ETH | — |
-| **Combinazioni totali** | **{_total_combos}** | — |
-| **Simulazioni totali** | **{_total_runs_batch}** | (combos × runs/passo) |
-""")
-        if _total_runs_batch > 400:
-            st.warning(f"⚠️ {_total_runs_batch} simulazioni totali — riduci i passi, runs o parametri variabili")
-        elif _total_runs_batch > 100:
-            st.info(f"ℹ️ {_total_runs_batch} simulazioni totali — potrebbe richiedere qualche minuto")
 
-    _batch_run_btn = st.button("✅ Confermo — Avvia Batch", type="primary", key="batch_run_btn")
+    _rc1, _rc2 = st.columns(2)
+    _rc1.info(f"**{_total_combos}** combinazioni × {int(_runs_per_step)} run = **{_total_runs_batch}** simulazioni totali")
+    if _total_runs_batch > 400:
+        _rc2.warning(f"⚠️ {_total_runs_batch} simulazioni — riduci passi/runs/parametri")
+    elif _total_runs_batch > 100:
+        _rc2.info(f"ℹ️ {_total_runs_batch} simulazioni — potrebbe richiedere qualche minuto")
+
+    _batch_run_btn = st.button("✅ Avvia Batch", type="primary", key="batch_run_btn")
 
     if _batch_run_btn:
-        _b_combos      = _batch_combos(_b_param_config, int(_bn_steps))
-        _b_results     = []
-        _b_prog        = st.progress(0, text="Avvio batch…")
-        _b_cfg_base    = _make_cfg(mode=_b_mode)
-        _rps           = int(_runs_per_step)
-        _n_combos      = max(len(_b_combos), 1)
-        _total_sims    = _n_combos * _rps
-        # Seed base deterministico catturato all'avvio del batch
+        _b_combos   = _batch_combos(_b_param_config, int(_bn_steps))
+        _b_results  = []
+        _b_prog     = st.progress(0, text="Avvio batch…")
+        _b_cfg_base = _make_cfg(mode=_b_mode)
+        _rps        = int(_runs_per_step)
+        _n_combos   = max(len(_b_combos), 1)
+        _total_sims = _n_combos * _rps
         _batch_base_seed = int(_time_mod.time() * 1000) % 99999
 
         def _apply_params(rc: dict, run_p: dict) -> None:
-            """Applica i parametri variabili al config dict."""
             if "Patt"          in run_p: rc["market"]["attack_rate"]                      = run_p["Patt"]
             if "L%"            in run_p: rc["market"]["loss_pct_mean"]                    = run_p["L%"]
             if "E (FNR)"       in run_p: rc["market"]["e"]                                = run_p["E (FNR)"]
@@ -1062,65 +1016,60 @@ with tab_batch:
         for _bi, _run_p in enumerate(_b_combos):
             _run_p_rounded = {k: round(float(v), 6) for k, v in _run_p.items()}
 
-            # Recupera i valori fissi (non variati) per le colonne sempre presenti nel CSV
             _rc_snap = copy.deepcopy(_b_cfg_base)
             _apply_params(_rc_snap, _run_p)
             _oracle_reward_val = float(
-                _rc_snap.get("oracles", {}).get("oracle_reward_per_claim",
-                _rc_snap.get("oracles", {}).get("reward_patt_update_eth", oracle_reward_per_claim))
+                _rc_snap.get("oracles", {}).get(
+                    "oracle_reward_per_claim",
+                    _rc_snap.get("oracles", {}).get("reward_patt_update_eth", oracle_reward_per_claim),
+                )
             )
             _min_prem_val = float(_rc_snap.get("premium", {}).get("min_premium_pct", min_premium_pct))
 
-            # --- Esegui _rps runs con seed distinti e deterministici ---
             _run_summaries = []
             _run_dfs       = []
             for _ri in range(_rps):
                 _rc = copy.deepcopy(_b_cfg_base)
-                # seed = base + bi*100 + ri  → deterministico ma distinto per ogni run
                 _rc["simulation"]["seed"] = (_batch_base_seed + _bi * 100 + _ri) % 99999
                 _apply_params(_rc, _run_p)
                 _sim_done += 1
-                _prog_text = (
-                    f"Passo {_bi+1}/{_n_combos}, run {_ri+1}/{_rps} "
-                    f"(tot {_sim_done}/{_total_sims})…"
+                _b_prog.progress(
+                    _sim_done / _total_sims,
+                    text=f"Passo {_bi+1}/{_n_combos}, run {_ri+1}/{_rps} (tot {_sim_done}/{_total_sims})…",
                 )
-                _b_prog.progress(_sim_done / _total_sims, text=_prog_text)
                 try:
                     _c, _p_pool, _s = run_single(_rc, mode=_b_mode, coverage=coverage, db_path=_DB_PATH)
                     _run_summaries.append(_s)
                     _run_dfs.append(_c.to_dataframe())
                 except Exception as _bex:
-                    _run_summaries.append({"_error": str(_bex), "pool_survived": False,
-                                           "total_profit_eth": 0.0, "final_solvency_ratio": 0.0,
-                                           "breakdown_event": None, "trend_slope": 0.0,
-                                           "avg_premium_rate_pct": 0.0, "avg_term1": 0.0,
-                                           "avg_term2": 0.0, "total_oracle_cost_eth": 0.0,
-                                           "total_real_payouts_eth": 0.0, "total_fraud_payouts_eth": 0.0})
+                    _run_summaries.append({
+                        "_error": str(_bex), "pool_survived": False,
+                        "total_profit_eth": 0.0, "final_solvency_ratio": 0.0,
+                        "breakdown_event": None, "trend_slope": 0.0,
+                        "avg_premium_rate_pct": 0.0, "avg_term1": 0.0,
+                        "avg_term2": 0.0, "total_oracle_cost_eth": 0.0,
+                        "total_real_payouts_eth": 0.0, "total_fraud_payouts_eth": 0.0,
+                    })
                     _run_dfs.append(None)
 
-            # --- Aggrega i risultati (media per numerici, frazione per booleani) ---
-            _n_ok   = len(_run_summaries)
-            _n_surv = sum(1 for s in _run_summaries if s.get("pool_survived", False))
+            _n_ok    = len(_run_summaries)
+            _n_surv  = sum(1 for s in _run_summaries if s.get("pool_survived", False))
             _surv_rate = _n_surv / max(_n_ok, 1)
 
             def _smean(key: str, default: float = 0.0) -> float:
-                vals = [s.get(key, default) for s in _run_summaries
-                        if not s.get("_error")]
+                vals = [s.get(key, default) for s in _run_summaries if not s.get("_error")]
                 return float(np.mean(vals)) if vals else default
 
-            # Per giorno_rottura prendiamo il peggiore (min day) delle run fallite
             _gg_rot_vals = [
                 s.get("breakdown_event", {}).get("day")
                 for s in _run_summaries
                 if s.get("breakdown_event") and not s.get("_error")
             ]
             _giorno_rottura = min(_gg_rot_vals) if _gg_rot_vals else "—"
-
-            # DataFrame rappresentativo: prima run andata a buon fine
             _repr_df = next((df for df in _run_dfs if df is not None), None)
 
             _b_results.append({
-                "run":                _bi + 1,
+                "run": _bi + 1,
                 **_run_p_rounded,
                 "oracle_reward_per_claim": round(_oracle_reward_val, 6),
                 "min_premium_pct":         round(_min_prem_val, 6),
@@ -1144,21 +1093,18 @@ with tab_batch:
         _b_prog.progress(1.0, text="✅ Batch completato!")
         st.rerun()
 
-    # --- Show results ---
     _br = st.session_state.get("batch_results")
     if _br:
         _br_clean = [{k: v for k, v in r.items() if not k.startswith("_")} for r in _br]
         _br_df    = pd.DataFrame(_br_clean)
 
         st.markdown("---")
-
-        # --- Metriche top ---
         _mc1, _mc2, _mc3, _mc4 = st.columns(4)
-        _n_surv = sum(1 for r in _br_clean if r.get("pool_survived", False))
+        _n_surv_b  = sum(1 for r in _br_clean if r.get("pool_survived", False))
         _prem_vals = [r.get("premio_medio_pct", 0) for r in _br_clean]
         _mc1.metric("Simulazioni totali", len(_br_clean))
-        _mc2.metric("Pool sopravvissuti", _n_surv,
-                    delta=f"{_n_surv/max(len(_br_clean),1):.0%}")
+        _mc2.metric("Pool sopravvissuti", _n_surv_b,
+                    delta=f"{_n_surv_b/max(len(_br_clean),1):.0%}")
         _mc3.metric("Trend positivo", sum(1 for r in _br_clean if r.get("trend_eth_giorno", 0) > 0))
         _mc4.metric("Premio medio", f"{np.mean(_prem_vals):.3f}%")
 
@@ -1175,7 +1121,6 @@ with tab_batch:
             _br_df.style.apply(_color_row, axis=1),
             use_container_width=True, hide_index=True, height=350,
         )
-
         st.download_button(
             "📥 Scarica CSV batch",
             data=_br_df.to_csv(index=False).encode("utf-8"),
@@ -1220,329 +1165,3 @@ with tab_batch:
         st.json({k: v for k, v in _sel_r.items() if not k.startswith("_")})
         if _sel_df is not None:
             st.dataframe(_sel_df, use_container_width=True, height=300)
-
-
-# ==========================================================================
-# TAB 3 — DATI INFURA
-# ==========================================================================
-with tab_infura:
-    st.subheader("🔗 Dati Infura — Gestione e Download")
-    st.markdown("### 🔑 Chiave API Infura")
-
-    _current_key = st.session_state.get("infura_api_key", "")
-    _kc, _bc = st.columns([4,1])
-    with _kc:
-        _key_input = st.text_input("Project ID Infura", value=_current_key,
-                                    key="infura_key_field", placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
-    with _bc:
-        st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("💾 Salva", key="save_infura_key_btn"):
-            _nk = _key_input.strip()
-            if _nk:
-                import re as _re
-                _by = os.path.join(_ROOT, "config", "base.yaml")
-                try:
-                    with open(_by) as _f: _cnt = _f.read()
-                    _cnt = _re.sub(r'(infura_url:\s*")[^"]*(")', rf'\g<1>wss://mainnet.infura.io/ws/v3/{_nk}\2', _cnt)
-                    with open(_by, "w") as _f: _f.write(_cnt)
-                    st.session_state["infura_api_key"] = _nk
-                    st.success("✅ Chiave salvata")
-                except Exception as ex: st.error(f"⚠️ {ex}")
-            else:
-                st.warning("Chiave non valida.")
-
-    _key_ok = len(st.session_state.get("infura_api_key","")) > 8
-    if _key_ok:
-        _k = st.session_state["infura_api_key"]
-        st.success(f"🟢 Chiave: `{_k[:6]}…{_k[-4:]}`")
-    else:
-        st.error("🔴 Chiave non configurata.")
-
-    st.info("ℹ️ **Mode 1:** Le transazioni reali vengono scaricate da Infura. "
-            "Patt e tutti gli altri parametri (loss, Tint, Vbase, E) sono configurati manualmente.")
-
-    st.markdown("---")
-    st.markdown("### ⚙️ Parametri Download")
-    _d1, _d2 = st.columns(2)
-    with _d1:
-        _block_range_days = st.number_input("Intervallo (giorni)", min_value=1, max_value=7, value=2, key="infura_block_range")
-    with _d2:
-        _dex_targets = st.multiselect("DEX da monitorare", _DEX_OPTIONS, default=["Uniswap V2","Uniswap V3"], key="infura_dex_targets")
-
-    if _dex_targets:
-        from scripts.download_blocks import CHUNK_SIZE as _CS, BLOCKS_PER_DAY as _BPD, _DEX_TOPIC_MAP as _DTM
-        _nc2 = (_block_range_days * _BPD + _CS - 1) // _CS
-        _ut  = len({_DTM[d] for d in _dex_targets if d in _DTM})
-        st.info(f"**Stima chiamate Infura:** {_nc2*_ut+1} (CHUNK_SIZE={_CS})")
-    else:
-        st.warning("Seleziona almeno un DEX.")
-
-    st.markdown("---")
-    st.markdown("### Azioni")
-    _a1, _a2, _a3 = st.columns(3)
-
-    with _a1:
-        if st.button("🔄 Scarica dati ora", key="infura_download_btn", disabled=not(_key_ok and _dex_targets)):
-            _iu = f"wss://mainnet.infura.io/ws/v3/{st.session_state['infura_api_key']}"
-            try:
-                from scripts.download_blocks import fetch_dex_events as _fe, save_to_db as _sd
-                _pb = st.progress(0, text="Avvio…")
-                def _cb(p,m): _pb.progress(int(min(p,100)), text=m)
-                _res = _fe(infura_url=_iu, days=int(_block_range_days), dex_targets=_dex_targets,
-                           cache_dir=os.path.join(_ROOT,"cache"), progress_cb=_cb, force_refresh=True)
-                _sd(_res, _DB_PATH)
-                _pb.progress(100, text="Completato!")
-                _m   = _res["metadata"]
-                st.session_state["infura_last_result"] = {
-                    "metadata": _m,
-                }
-                st.success(f"✅ {_m['total_swaps']:,} swap scaricati | {_m['infura_calls_used']} chiamate Infura")
-                st.rerun()
-            except ImportError: st.error("⚠️ `web3` non installato. `pip install web3`")
-            except Exception as ex: st.error(f"⚠️ {ex}")
-
-    with _a2:
-        if st.button("🗑️ Cancella cache", key="infura_clear_btn"):
-            st.session_state["confirm_clear_cache"] = True
-        if st.session_state.get("confirm_clear_cache", False):
-            st.warning("Eliminare i file .pkl dalla cache?")
-            _cc1, _cc2 = st.columns(2)
-            with _cc1:
-                if st.button("✅ Sì", key="confirm_clear_yes"):
-                    _del = 0
-                    for _cf in _glob.glob(os.path.join(_CACHE_DIR,"*.pkl")):
-                        os.remove(_cf); _del += 1
-                    st.session_state["confirm_clear_cache"] = False
-                    st.success(f"🗑️ Eliminati {_del} file."); st.rerun()
-            with _cc2:
-                if st.button("❌ No", key="confirm_clear_no"):
-                    st.session_state["confirm_clear_cache"] = False
-
-    with _a3:
-        _dbe = os.path.isfile(_DB_PATH)
-        _prev_btn = st.button("👁️ Anteprima", key="infura_preview_btn", disabled=not _dbe)
-
-    if _prev_btn and _dbe:
-        try:
-            _pc = sqlite3.connect(_DB_PATH, check_same_thread=False)
-            _pd2 = pd.read_sql("SELECT * FROM swaps ORDER BY timestamp DESC LIMIT 50", _pc)
-            _pc.close()
-            st.dataframe(_pd2, use_container_width=True)
-        except Exception as ex: st.error(f"⚠️ {ex}")
-
-    st.markdown("---")
-    st.markdown("### 📊 Stato Database")
-
-    _dbe2 = os.path.isfile(_DB_PATH)
-    _cfa  = _glob.glob(os.path.join(_CACHE_DIR,"*.pkl"))
-    _lfs  = "mai"
-    if _dbe2: _lfs = datetime.datetime.fromtimestamp(os.path.getmtime(_DB_PATH)).strftime("%d/%m/%Y %H:%M")
-    _ci = f"✓ {len(_cfa)} file" if _cfa else "✗ assente"
-
-    if _dbe2:
-        try:
-            _sc = sqlite3.connect(_DB_PATH, check_same_thread=False)
-            from scripts.download_blocks import _DDL as _DB_DDL
-            _sc.executescript(_DB_DDL); _sc.commit()
-            _tsw = _sc.execute("SELECT COUNT(*) FROM swaps").fetchone()[0]
-            _mb  = _sc.execute("SELECT MIN(block_number) FROM swaps").fetchone()[0] or 0
-            _xb  = _sc.execute("SELECT MAX(block_number) FROM swaps").fetchone()[0] or 0
-            _mt  = _sc.execute("SELECT MIN(timestamp) FROM swaps").fetchone()[0] or 0
-            _xt  = _sc.execute("SELECT MAX(timestamp) FROM swaps").fetchone()[0] or 0
-            _dc  = dict(_sc.execute("SELECT dex,COUNT(*) FROM swaps GROUP BY dex").fetchall())
-            _sc.close()
-            def _fmt(t):
-                try: return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%d/%m/%Y")
-                except: return "—"
-            st.markdown(
-                f"| Campo | Valore |\n|---|---|\n"
-                f"| Aggiornamento DB | {_lfs} |\n| Cache | {_ci} |\n"
-                f"| Blocchi | #{_mb:,}→#{_xb:,} |\n| Periodo | {_fmt(_mt)}—{_fmt(_xt)} |\n"
-                f"| **Swap totali** | **{_tsw:,}** |\n"
-                f"| — Uniswap V2 | {_dc.get('uniswap_v2',0):,} |\n"
-                f"| — Uniswap V3 | {_dc.get('uniswap_v3',0):,} |\n"
-                f"| — Sushiswap | {_dc.get('sushiswap',0):,} |\n"
-                f"| — Curve | {_dc.get('curve',0):,} |\n"
-            )
-        except Exception as ex: st.warning(f"Statistiche non disponibili: {ex}")
-    else:
-        st.info("Nessun database locale. Configura la chiave Infura e scarica i dati.")
-
-    st.markdown("---")
-    st.markdown("### 📅 Dettaglio Blocchi Scaricati")
-
-    if _dbe2:
-        try:
-            _bc2 = sqlite3.connect(_DB_PATH, check_same_thread=False)
-            _block_rows = _bc2.execute(
-                "SELECT block_number, timestamp, COUNT(*) as n_swaps "
-                "FROM swaps GROUP BY block_number ORDER BY block_number"
-            ).fetchall()
-            _bc2.close()
-            if _block_rows:
-                import datetime as _dt
-                _br_data = []
-                for bn, ts, ns in _block_rows:
-                    try:
-                        _dt_obj = _dt.datetime.fromtimestamp(ts, _dt.timezone.utc)
-                        _date_s = _dt_obj.strftime("%d/%m/%Y")
-                        _time_s = _dt_obj.strftime("%H:%M:%S")
-                    except Exception:
-                        _date_s, _time_s = "—", "—"
-                    _br_data.append({
-                        "Blocco #":             bn,
-                        "Data (UTC)":           _date_s,
-                        "Ora (UTC)":            _time_s,
-                        "Swap totali nel pool": ns,
-                    })
-                _br_df = pd.DataFrame(_br_data)
-                st.dataframe(_br_df, use_container_width=True, hide_index=True, height=250)
-                st.caption(
-                    f"Periodo: blocco #{_br_data[0]['Blocco #']:,} "
-                    f"({_br_data[0]['Data (UTC)']} {_br_data[0]['Ora (UTC)']}) "
-                    f"→ #{_br_data[-1]['Blocco #']:,} "
-                    f"({_br_data[-1]['Data (UTC)']} {_br_data[-1]['Ora (UTC)']})"
-                    f" | {len(_br_data)} blocchi con swap"
-                )
-                st.caption(
-                    "**Swap totali nel pool** = tutti gli eventi Swap rilevati da `eth_getLogs` "
-                    "per quel pool in quel blocco."
-                )
-            else:
-                st.info("Nessun dato di blocco disponibile.")
-        except Exception as _bex:
-            st.warning(f"Blocchi non disponibili: {_bex}")
-    else:
-        st.info("Scarica i dati per vedere il dettaglio dei blocchi.")
-
-    st.markdown("---")
-    st.markdown("### 🔍 Come Funziona il Download Dati")
-
-    _ilr = st.session_state.get("infura_last_result")
-    try:
-        from scripts.download_blocks import CHUNK_SIZE as _CS, BLOCKS_PER_DAY as _BPD2
-    except Exception:
-        _CS, _BPD2 = 500, 6600
-
-    info_box("Metodo di fetch",
-        f"<b>eth_getLogs</b> scarica in blocco tutti gli eventi Swap dai pool DEX selezionati, "
-        f"divisi in chunk da {_CS} blocchi. Nessun fetch blocco per blocco.", "blue")
-
-    _ci1, _ci2, _ci3 = st.columns(3)
-    _ci1.markdown(
-        '<div style="background:#1f77b415;border-left:3px solid #1f77b4;padding:8px;border-radius:4px">'
-        '🏊 <b>Pool DEX</b><br><small>Scarica eventi Swap da Uniswap V2/V3, Sushiswap, Curve</small></div>',
-        unsafe_allow_html=True)
-    _ci2.markdown(
-        '<div style="background:#2ca02c15;border-left:3px solid #2ca02c;padding:8px;border-radius:4px">'
-        f'📦 <b>Chunk da {_CS} blocchi</b><br><small>~{(_BPD2 + _CS - 1) // _CS} chiamate per giorno invece di ~{_BPD2:,}</small></div>',
-        unsafe_allow_html=True)
-    _ci3.markdown(
-        '<div style="background:#ff7f0e15;border-left:3px solid #ff7f0e;padding:8px;border-radius:4px">'
-        '💾 <b>Cache locale</b><br><small>I dati vengono salvati in SQLite per riuso offline</small></div>',
-        unsafe_allow_html=True)
-
-    if _ilr:
-        _meta = _ilr["metadata"]
-        _ts   = _meta.get("total_swaps", 0)
-        _nc   = _meta.get("total_chunks", 0)
-        _nb   = _meta.get("total_blocks", 0)
-        _ic   = _meta.get("infura_calls_used", 0)
-        st.markdown(
-            f"**Ultimo fetch:** {_ts:,} swap in {_nc} chunk ({_nb:,} blocchi) — {_ic} chiamate Infura"
-        )
-    else:
-        st.info("Scarica i dati Infura per vedere le statistiche del fetch.")
-
-
-# ==========================================================================
-# TAB 3 — ISTRUZIONI
-# ==========================================================================
-with tab_istr:
-    st.subheader("📖 Guida al Simulatore MEV Insurance")
-
-    st.markdown("""
-### Come Usare il Simulatore
-
-1. **Scarica i dati Infura** nella tab 🔗 (opzionale, per transazioni reali)
-2. **Attiva il toggle** nella sidebar: *Usa transazioni reali da Infura* (se disponibile)
-3. **Configura Patt** nel slider *Patt (tasso attacco)* — sempre manuale
-4. **Configura** gli altri parametri negli expander della sidebar
-5. **Leggi il Riepilogo** nella tab *Simulazione*
-6. **Premi ▶ Avvia Simulazione**
-7. **Esplora i risultati** nei pannelli
-
-> Senza dati Infura: il toggle è disabilitato e la simulazione è completamente sintetica.
-""")
-
-    with st.expander("🏛️ Come Funziona il Protocollo"):
-        st.markdown("""
-**Attori:**
-
-| Attore | Ruolo |
-|---|---|
-| User | Paga premio, riceve rimborso se attaccato |
-| Pool | Raccoglie premi, paga rimborsi |
-| MEV Bot | Esegue sandwich attack sulla vittima |
-
-**Flusso:**
-1. Utente paga premio P prima dello swap
-2. Se attaccato → claim auto-approvato
-3. Payout = loss_eth × Fcov_rimborso
-""")
-
-    with st.expander("📐 Formula del Premio"):
-        st.markdown("""
-```
-P = V × [(Patt × L%) + (Tint × E/(1−E)) / Vbase] × (1 + M) × Fcov
-```
-
-**Termine 1** — costo puro del rischio stocastico:
-- `Patt × L%` = probabilità attacco × perdita media
-
-**Termine 2** — costo del rischio da falsi negativi:
-- `Tint` = frodi intercettate (D-1) × valore medio swap [ETH] — **calcolato automaticamente**
-- `E` = False Negative Rate — configurabile in sidebar
-- `Vbase` = swap assicurati giorno D-1 — **calcolato automaticamente** dal simulatore
-
-**Aggiornamento giornaliero:**
-- `Vbase` = numero di swap assicurati del giorno precedente (Infura reali o sintetici)
-- `Tint` = n_frodi_intercettate_{D-1} × avg_swap_value_{D-1} in ETH
-
-**Logica frodi:**
-- `n_fraud_attempts` = n_real_attacks × fraud_claim_pct
-- `n_fraud_caught` = n_fraud_attempts × (1 − E)  → nessun payout, contribuisce a Tint
-- `n_fraud_escaped` = n_fraud_attempts × E         → payout erogato (frode non rilevata)
-
-**Margine dinamico:**
-- `M = Mbase + M_adj`
-- `M_adj`: 0.00 (SR ≥ soglia alta) / 0.05 (SR ≥ soglia media) / 0.10 (SR < soglia media)
-
-**Copertura:**
-- `Fcov`: 0.70 Bassa / 0.90 Media / 1.00 Alta
-
-**Rottura pool:**
-- Solo `balance_eth < 0` è rottura
-- SR è usato SOLO per modulare M_adj, non come condizione di stop
-""")
-
-    with st.expander("🎲 Randomicità"):
-        st.markdown("""
-- **Seed automatico**: `int(time.time()) % 99999` — ogni esecuzione produce risultati diversi
-- **Patt giornaliero**: base × `rng.uniform(0.7, 1.3)` ogni giorno (noise ±30%)
-- **Swap per utente**: `rng.poisson(swap_freq_mean)` ogni giorno
-""")
-
-    with st.expander("🔍 Download Dati Infura"):
-        st.markdown("""
-**Algoritmo in `scripts/download_blocks.py`:**
-
-1. Raccoglie eventi `Swap` da Uniswap/Sushiswap/Curve via `eth_getLogs` (CHUNK_SIZE=500)
-2. Ordina per blocco, indice transazione, indice log
-3. Salva gli swap nel database SQLite locale per riuso
-4. Patt è **sempre impostato manualmente** tramite lo slider sidebar
-
-> **Note:** il fetch usa esclusivamente `eth_getLogs` senza chiamate aggiuntive
-> `eth_getTransactionByHash`. ~27 chiamate invece di ~13.300 per 2 giorni.
-> Patt non viene calcolato dai dati — usa il valore dello slider.
-""")
