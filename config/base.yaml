@@ -5,14 +5,6 @@ simulation:
   n_runs: 1
   swaps_per_day: 100
 
-blockchain:
-  infura_url: "wss://mainnet.infura.io/ws/v3/23727094121c4343b05d474e08e1a3ff"
-  blocks_to_fetch: 50000
-  dex_contracts:
-    uniswap_v2: "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
-    uniswap_v3: "0x1F98431c8aD98523631AE4a59f267346ea31F984"
-    sushiswap: "0xC0AEe478e3658e2610c5F7A4A2E1777cE9e4f2Ac"
-
 market:
   insurance_rate: 0.50
   loss_pct_mean: 0.20
