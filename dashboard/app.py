@@ -1,5 +1,5 @@
 """
-MEV Insurance Protocol — Streamlit Dashboard (v5: UI unificata, no sidebar, no tab).
+MEV Insurance Protocol — Streamlit Dashboard (v6: fully synthetic, no Infura).
 
 Avvio:
     streamlit run dashboard/app.py
@@ -7,12 +7,9 @@ Avvio:
 from __future__ import annotations
 
 import copy
-import datetime
 import os
 import time as _time_mod
-import sqlite3
 import sys
-import glob as _glob
 from itertools import product as _itertools_product
 
 import numpy as np
@@ -26,15 +23,12 @@ if _ROOT not in sys.path:
 from utils.config_loader import load_config
 from runner import run_single
 
-_DB_PATH   = os.path.join(_ROOT, "data", "blockchain.db")
-_CACHE_DIR = os.path.join(_ROOT, "cache")
+_DB_PATH = os.path.join(_ROOT, "data", "blockchain.db")
 
 _COVERAGE_LABELS   = ["Bassa", "Media", "Alta"]
 _COVERAGE_INTERNAL = {"Bassa": "low", "Media": "medium", "Alta": "high"}
 _COVERAGE_REIMB    = {"Bassa": "50%", "Media": "70%", "Alta": "100%"}
 _COVERAGE_FCOV     = {"Bassa": 0.70, "Media": 0.90, "Alta": 1.00}
-
-_DEX_OPTIONS = ["Uniswap V2", "Uniswap V3", "Sushiswap", "Curve"]
 
 st.set_page_config(
     page_title="MEV Insurance Simulator",
@@ -63,53 +57,10 @@ def info_box(titolo: str, contenuto: str, colore: str = "blue") -> None:
 # =========================================================================
 # Session state
 # =========================================================================
-def _read_infura_key_from_config() -> str:
-    try:
-        cfg = load_config(os.path.join(_ROOT, "config", "base.yaml"))
-        url = cfg.get("infura_url", "")
-        if "/v3/" in url:
-            return url.split("/v3/")[-1].rstrip("/")
-    except Exception:
-        pass
-    return ""
-
-
-def _db_swap_count() -> int:
-    if not os.path.isfile(_DB_PATH):
-        return 0
-    try:
-        con = sqlite3.connect(_DB_PATH, check_same_thread=False)
-        n = con.execute("SELECT COUNT(*) FROM swaps").fetchone()[0]
-        con.close()
-        return int(n)
-    except Exception:
-        return 0
-
-
-def _db_avg_swap_value() -> float:
-    """Valore medio swap da DB (0 se non disponibile)."""
-    if not os.path.isfile(_DB_PATH):
-        return 0.0
-    try:
-        con = sqlite3.connect(_DB_PATH, check_same_thread=False)
-        try:
-            val = con.execute("SELECT AVG(value_eth) FROM swaps").fetchone()[0]
-        except Exception:
-            val = None
-        con.close()
-        return float(val) if val else 0.0
-    except Exception:
-        return 0.0
-
-
 for _k, _v in [
     ("results",    {}),
     ("summaries",  {}),
     ("collectors", {}),
-    ("last_mode",  2),
-    ("infura_api_key", _read_infura_key_from_config()),
-    ("confirm_clear_cache", False),
-    ("infura_last_result", None),
     ("batch_results", None),
     ("sim_seed_info", None),
 ]:
@@ -124,108 +75,6 @@ st.markdown(
     '<h1 style="margin-bottom:4px">🛡️ MEV Insurance Protocol Simulator</h1>',
     unsafe_allow_html=True,
 )
-st.markdown("---")
-
-# =========================================================================
-# SEZIONE 1 — FONTE DATI + INFURA
-# =========================================================================
-_n_swaps_db   = _db_swap_count()
-_cache_exists = _n_swaps_db > 0
-
-_col_toggle, _col_infura = st.columns([1, 3])
-
-with _col_toggle:
-    st.markdown("**Fonte Dati**")
-    use_infura_txs = st.toggle(
-        "Usa transazioni reali da Infura",
-        value=_cache_exists,
-        disabled=not _cache_exists,
-        key="use_infura",
-    )
-    if _cache_exists:
-        _avg_db = _db_avg_swap_value()
-        _avg_str = f"{_avg_db:.4f} ETH" if _avg_db > 0 else "~0.5 ETH (log-normale)"
-        st.caption(f"✅ {_n_swaps_db:,} swap in DB  \n📊 Valore medio: **{_avg_str}**")
-    else:
-        st.caption("⚠️ Nessun dato Infura — modalità sintetica")
-
-with _col_infura:
-    st.markdown("**Dati Infura** — scarica per usare transazioni reali o aggiornare il valore medio swap")
-    _ik1, _ik2, _ik3, _ik4, _ik5 = st.columns([3, 1, 1, 2, 1])
-    with _ik1:
-        _key_input = st.text_input(
-            "Project ID",
-            value=st.session_state.get("infura_api_key", ""),
-            key="infura_key_field",
-            placeholder="Project ID Infura (xxxxxxxx…)",
-            label_visibility="collapsed",
-        )
-    with _ik2:
-        _save_key_btn = st.button("💾 Salva", key="save_infura_key_btn")
-    with _ik3:
-        _block_range_days = st.number_input(
-            "Giorni", min_value=1, max_value=7, value=2,
-            key="infura_block_range", label_visibility="collapsed",
-        )
-    with _ik4:
-        _dex_targets = st.multiselect(
-            "DEX",
-            _DEX_OPTIONS, default=["Uniswap V2", "Uniswap V3"],
-            key="infura_dex_targets", label_visibility="collapsed",
-        )
-    with _ik5:
-        _key_ok = len(st.session_state.get("infura_api_key", "")) > 8
-        _dl_btn = st.button("🔄 Scarica", key="infura_download_btn",
-                            disabled=not (_key_ok and _dex_targets))
-
-    if _save_key_btn:
-        _nk = _key_input.strip()
-        if _nk:
-            import re as _re
-            _by = os.path.join(_ROOT, "config", "base.yaml")
-            try:
-                with open(_by) as _f:
-                    _cnt = _f.read()
-                _cnt = _re.sub(
-                    r'(infura_url:\s*")[^"]*(")',
-                    rf'\g<1>wss://mainnet.infura.io/ws/v3/{_nk}\2',
-                    _cnt,
-                )
-                with open(_by, "w") as _f:
-                    _f.write(_cnt)
-                st.session_state["infura_api_key"] = _nk
-                st.success("✅ Chiave salvata")
-            except Exception as _ex:
-                st.error(f"⚠️ {_ex}")
-        else:
-            st.warning("Chiave non valida.")
-
-    if _dl_btn and _key_ok and _dex_targets:
-        _iu = f"wss://mainnet.infura.io/ws/v3/{st.session_state['infura_api_key']}"
-        try:
-            from scripts.download_blocks import fetch_dex_events as _fe, save_to_db as _sd
-            _pb = st.progress(0, text="Avvio download…")
-            def _cb(p, m): _pb.progress(int(min(p, 100)), text=m)
-            _res = _fe(
-                infura_url=_iu, days=int(_block_range_days), dex_targets=_dex_targets,
-                cache_dir=os.path.join(_ROOT, "cache"), progress_cb=_cb, force_refresh=True,
-            )
-            _sd(_res, _DB_PATH)
-            _pb.progress(100, text="Completato!")
-            _m = _res["metadata"]
-            st.session_state["infura_last_result"] = {"metadata": _m}
-            st.success(f"✅ {_m['total_swaps']:,} swap scaricati | {_m['infura_calls_used']} chiamate Infura")
-            st.rerun()
-        except ImportError:
-            st.error("⚠️ `web3` non installato. `pip install web3`")
-        except Exception as _ex:
-            st.error(f"⚠️ {_ex}")
-
-use_infura_patt = False
-mode     = 1 if use_infura_txs else 2
-is_mode1 = mode == 1
-is_mode2 = mode == 2
-
 st.markdown("---")
 
 # =========================================================================
@@ -245,8 +94,8 @@ with _c1:
         help="Bassa → 50% rimborso | Media → 70% | Alta → 100%",
     )
     swaps_per_day  = st.number_input(
-        "Swap/giorno (sint.)", min_value=10, max_value=10000, value=100, step=10,
-        key="sim_swaps_day", disabled=is_mode1,
+        "Swap/giorno", min_value=10, max_value=10000, value=100, step=10,
+        key="sim_swaps_day",
     )
 
 with _c2:
@@ -309,11 +158,12 @@ with _c5:
     )
     n_synthetic_users = st.number_input(
         "N utenti sintetici", min_value=5, max_value=500, value=50, step=5,
-        key="m2_n_users", disabled=is_mode1,
+        key="m2_n_users",
+        help="Numero di utenti al giorno 0. Cresce del ~2%/giorno automaticamente.",
     )
     max_daily_swaps = st.number_input(
         "Max swap/utente/gg", min_value=1, max_value=100, value=10, step=1,
-        key="m2_max_daily_swaps", disabled=is_mode1,
+        key="m2_max_daily_swaps",
     )
 
 coverage = _COVERAGE_INTERNAL[coverage_label]
@@ -326,7 +176,7 @@ st.markdown("---")
 # =========================================================================
 
 def _build_config(
-    mode, duration_days, swaps_per_day, coverage,
+    duration_days, swaps_per_day, coverage,
     mbase, loss_pct, sr_threshold_high, sr_threshold_med,
     initial_pool_balance,
     n_synthetic_users, max_daily_swaps,
@@ -335,56 +185,32 @@ def _build_config(
     oracle_reward_per_claim=0.002,
     min_premium_pct=0.015,
 ) -> dict:
-    cfg_path = os.path.join(
-        _ROOT, "config",
-        "mode1_realchain.yaml" if mode == 1 else "mode2_synthetic.yaml",
-    )
-    cfg = load_config(cfg_path)
+    cfg = load_config(os.path.join(_ROOT, "config", "mode2_synthetic.yaml"))
 
     run_seed = int(_time_mod.time()) % 99999
     st.session_state["sim_seed_info"] = run_seed
 
-    cfg["simulation"]["duration_days"] = int(duration_days)
-    cfg["simulation"]["seed"]          = run_seed
+    cfg["simulation"]["duration_days"]                = int(duration_days)
+    cfg["simulation"]["seed"]                         = run_seed
+    cfg["simulation"]["swaps_per_day"]                = int(swaps_per_day)
     cfg["pool"]["mbase"]                              = float(mbase)
     cfg["pool"]["initial_balance_eth"]                = float(initial_pool_balance)
     cfg["pool"]["solvency_thresholds"]["high_risk"]   = float(sr_threshold_med)
     cfg["pool"]["solvency_thresholds"]["medium_risk"] = float(sr_threshold_high)
-    cfg["market"]["loss_pct_mean"] = float(loss_pct)
-    cfg["market"]["e"]             = float(e_fnr)
-    cfg["simulation"]["fraud_claim_pct"] = float(fraud_claim_pct)
-    cfg.setdefault("market", {})["attack_rate"] = float(patt_override)
-
-    if mode == 2:
-        cfg["users"]["initial_count"]       = int(n_synthetic_users)
-        cfg["simulation"]["swaps_per_day"]  = int(swaps_per_day)
-        cfg["users"]["max_daily_swaps"]     = int(max_daily_swaps)
-
+    cfg["market"]["loss_pct_mean"]                    = float(loss_pct)
+    cfg["market"]["e"]                                = float(e_fnr)
+    cfg["simulation"]["fraud_claim_pct"]              = float(fraud_claim_pct)
+    cfg.setdefault("market", {})["attack_rate"]       = float(patt_override)
+    cfg["users"]["initial_count"]                     = int(n_synthetic_users)
+    cfg["users"]["max_daily_swaps"]                   = int(max_daily_swaps)
     cfg.setdefault("oracles", {})["oracle_reward_per_claim"] = float(oracle_reward_per_claim)
-    cfg.setdefault("premium", {})["min_premium_pct"] = float(min_premium_pct)
+    cfg.setdefault("premium", {})["min_premium_pct"]         = float(min_premium_pct)
 
     return cfg
 
 
-def _all_params() -> dict:
-    return dict(
-        mode=mode, duration_days=duration_days, swaps_per_day=swaps_per_day,
-        coverage_label=coverage_label, coverage=coverage,
-        mbase=mbase, loss_pct=loss_pct,
-        sr_threshold_high=sr_threshold_high, sr_threshold_med=sr_threshold_med,
-        initial_pool_balance=initial_pool_balance,
-        patt_override=patt_override,
-        n_synthetic_users=n_synthetic_users, max_daily_swaps=max_daily_swaps,
-        e_fnr=e_fnr, fraud_claim_pct=fraud_claim_pct,
-        oracle_reward_per_claim=oracle_reward_per_claim,
-        min_premium_pct=min_premium_pct,
-        use_infura_txs=use_infura_txs,
-    )
-
-
 def _make_cfg(**kwargs) -> dict:
     return _build_config(
-        mode=kwargs.get("mode", mode),
         duration_days=kwargs.get("duration_days", duration_days),
         swaps_per_day=kwargs.get("swaps_per_day", swaps_per_day),
         coverage=kwargs.get("coverage", coverage),
@@ -431,22 +257,14 @@ if sim_type == "📊 Singola":
         _export_btn = st.button("📥 Esporta CSV", key="export_btn")
 
     if run_btn:
-        errors = []
-        if use_infura_txs and _db_swap_count() == 0:
-            errors.append("Il database Infura è vuoto. Scarica i dati prima di usare transazioni reali.")
-        if errors:
-            for e in errors:
-                st.error(f"⚠️ {e}")
-        else:
-            cfg = _make_cfg()
-            with st.spinner("Simulazione in corso…"):
-                collector, pool, summary = run_single(cfg, mode=mode, coverage=coverage, db_path=_DB_PATH)
-                label = coverage_label
-                st.session_state["results"]    = {label: collector.to_dataframe()}
-                st.session_state["summaries"]  = {label: summary}
-                st.session_state["collectors"] = {label: collector}
-                st.session_state["last_mode"]  = mode
-            st.success("✅ Simulazione completata!")
+        cfg = _make_cfg()
+        with st.spinner("Simulazione in corso…"):
+            collector, pool, summary = run_single(cfg, coverage=coverage, db_path=_DB_PATH)
+            label = coverage_label
+            st.session_state["results"]    = {label: collector.to_dataframe()}
+            st.session_state["summaries"]  = {label: summary}
+            st.session_state["collectors"] = {label: collector}
+        st.success("✅ Simulazione completata!")
 
     if _export_btn and st.session_state["results"]:
         frames   = [df.assign(run=lbl) for lbl, df in st.session_state["results"].items()]
@@ -462,18 +280,12 @@ if sim_type == "📊 Singola":
     collectors = st.session_state["collectors"]
 
     if not results:
-        if use_infura_txs and _db_swap_count() == 0:
-            info_box("Dati mancanti",
-                     "Scarica prima i dati Infura (sezione sopra) oppure disabilita "
-                     "il toggle <b>Usa transazioni reali da Infura</b>.", "orange")
-        else:
-            st.info("Configura i parametri e premi **▶ Avvia Simulazione**.")
+        st.info("Configura i parametri e premi **▶ Avvia Simulazione**.")
     else:
         first_label     = next(iter(results))
         first_df        = results[first_label]
         first_summary   = summaries[first_label]
         first_collector = collectors.get(first_label)
-        last_mode       = st.session_state.get("last_mode", 2)
 
         _bd = first_summary.get("breakdown_event")
 
@@ -617,8 +429,8 @@ if sim_type == "📊 Singola":
             use_container_width=True, height=250,
         )
 
-        # ---- Pannello 4: Utenti (solo sintetica) ----
-        if last_mode == 2:
+        # ---- Pannello 4: Utenti ----
+        if True:
             st.markdown("---")
             st.subheader("4 — Distribuzione Utenti")
             fonte("Utenti sintetici da SyntheticDataSource — solo simulazione sintetica")
@@ -648,7 +460,7 @@ if sim_type == "📊 Singola":
         st.dataframe(eco_df, use_container_width=True, hide_index=True)
         fonte("InsurancePool — cumulativo al termine della simulazione")
 
-        base_risk = (patt_override if is_mode2 else 0.05) * loss_pct
+        base_risk = patt_override * loss_pct
         prem_ex2  = base_risk * (1 + mbase) * fcov
         atk_frac  = base_risk * fcov / prem_ex2 * 100 if prem_ex2 > 0 else 0
         marg_frac = base_risk * mbase * fcov / prem_ex2 * 100 if prem_ex2 > 0 else 0
@@ -772,7 +584,7 @@ if sim_type == "📊 Singola":
                 _avg_sv  = float(row.get("avg_swap_value_eth", 0.0))
                 _n_fe_d  = int(row.get("n_fraud_escaped", 0))
                 _oc_d    = float(row.get("oracle_cost_today", 0.0))
-                _vb_src  = "swap assicurati ieri — da Infura" if last_mode == 1 else "swap sintetici assicurati ieri"
+                _vb_src  = "swap sintetici assicurati ieri"
                 st.code(
                     f"Vbase        = {_vbase_d:.0f} swap  ({_vb_src})\n"
                     f"Tint         = {_tint_d:.4f} ETH  ({_n_fc_d} frodi × {_avg_sv:.4f} ETH/swap)\n"
@@ -869,7 +681,7 @@ if sim_type == "📊 Singola":
                 n_fc    = int(fr.get("n_fraud_caught", 0))
                 n_fe    = int(fr.get("n_fraud_escaped", 0))
                 avg_sv  = float(fr.get("avg_swap_value_eth", 0.0))
-                _vb_src = "Infura D-1" if (last_mode == 1) else "sintetico D-1"
+                _vb_src = "sintetico D-1"
                 rows_f.append({
                     "Giorno":     int(fr["day"]),
                     "Patt":       f"{patt_d:.3%}",
@@ -918,11 +730,6 @@ elif sim_type == "🔁 Batch":
             key="batch_runs_per_step",
             help="Se > 1, ogni combinazione viene eseguita N volte e i risultati vengono mediati.",
         )
-        _b_use_real = st.toggle(
-            "Usa transazioni Infura", value=_cache_exists,
-            disabled=not _cache_exists, key="batch_use_infura",
-        )
-        _b_mode = 1 if _b_use_real else 2
     with b2:
         _b_params = st.multiselect(
             "Parametri variabili",
@@ -996,7 +803,7 @@ elif sim_type == "🔁 Batch":
         _b_combos   = _batch_combos(_b_param_config, int(_bn_steps))
         _b_results  = []
         _b_prog     = st.progress(0, text="Avvio batch…")
-        _b_cfg_base = _make_cfg(mode=_b_mode)
+        _b_cfg_base = _make_cfg()
         _rps        = int(_runs_per_step)
         _n_combos   = max(len(_b_combos), 1)
         _total_sims = _n_combos * _rps
@@ -1038,7 +845,7 @@ elif sim_type == "🔁 Batch":
                     text=f"Passo {_bi+1}/{_n_combos}, run {_ri+1}/{_rps} (tot {_sim_done}/{_total_sims})…",
                 )
                 try:
-                    _c, _p_pool, _s = run_single(_rc, mode=_b_mode, coverage=coverage, db_path=_DB_PATH)
+                    _c, _p_pool, _s = run_single(_rc, coverage=coverage, db_path=_DB_PATH)
                     _run_summaries.append(_s)
                     _run_dfs.append(_c.to_dataframe())
                 except Exception as _bex:

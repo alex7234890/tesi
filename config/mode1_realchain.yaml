@@ -1,9 +1,0 @@
-# Mode 1 overrides: Real blockchain data + partial simulation
-# Tiers are omitted in mode 1 (worst-case scenario for pool solvency)
-simulation:
-  seed: 42
-
-market:
-  insurance_rate: 0.50
-  loss_pct_mean: 0.20
-  loss_pct_std: 0.02
