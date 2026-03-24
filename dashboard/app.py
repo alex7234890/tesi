@@ -157,13 +157,29 @@ with _c5:
         help="Floor minimo premio prima di Fcov. Default 1.5%.",
     )
     n_synthetic_users = st.number_input(
-        "N utenti sintetici", min_value=5, max_value=500, value=50, step=5,
+        "N utenti iniziali", min_value=5, max_value=500, value=50, step=5,
         key="m2_n_users",
-        help="Numero di utenti al giorno 0. Cresce del ~2%/giorno automaticamente.",
+        help="Utenti al giorno 0. Crescono ogni giorno in base alla crescita giornaliera.",
     )
+    _growth_raw = st.number_input(
+        "Crescita utenti/gg (%)", min_value=0.0, max_value=20.0, value=2.0,
+        step=0.5, format="%.1f", key="m2_growth_rate",
+        help="Percentuale di nuovi utenti aggiunti ogni giorno. 0 = numero fisso.",
+    )
+    growth_rate_daily = _growth_raw / 100.0
     max_daily_swaps = st.number_input(
         "Max swap/utente/gg", min_value=1, max_value=100, value=10, step=1,
         key="m2_max_daily_swaps",
+    )
+    swap_value_mean_eth = st.number_input(
+        "Valore medio swap (ETH)", min_value=0.01, max_value=20.0, value=0.50,
+        step=0.05, format="%.2f", key="swap_value_mean",
+        help="Media della distribuzione log-normale dei valori swap.",
+    )
+    swap_value_sigma = st.number_input(
+        "Variabilità swap (σ log)", min_value=0.05, max_value=2.0, value=0.40,
+        step=0.05, format="%.2f", key="swap_value_sigma",
+        help="σ della log-normale. Valori alti → più swap molto grandi o molto piccoli.",
     )
 
 coverage = _COVERAGE_INTERNAL[coverage_label]
@@ -179,7 +195,8 @@ def _build_config(
     duration_days, swaps_per_day, coverage,
     mbase, loss_pct, sr_threshold_high, sr_threshold_med,
     initial_pool_balance,
-    n_synthetic_users, max_daily_swaps,
+    n_synthetic_users, growth_rate_daily, max_daily_swaps,
+    swap_value_mean_eth, swap_value_sigma,
     patt_override,
     e_fnr, fraud_claim_pct,
     oracle_reward_per_claim=0.002,
@@ -199,9 +216,12 @@ def _build_config(
     cfg["pool"]["solvency_thresholds"]["medium_risk"] = float(sr_threshold_high)
     cfg["market"]["loss_pct_mean"]                    = float(loss_pct)
     cfg["market"]["e"]                                = float(e_fnr)
+    cfg["market"]["swap_value_mean_eth"]              = float(swap_value_mean_eth)
+    cfg["market"]["swap_value_sigma"]                 = float(swap_value_sigma)
     cfg["simulation"]["fraud_claim_pct"]              = float(fraud_claim_pct)
     cfg.setdefault("market", {})["attack_rate"]       = float(patt_override)
     cfg["users"]["initial_count"]                     = int(n_synthetic_users)
+    cfg["users"]["growth_rate_daily"]                 = float(growth_rate_daily)
     cfg["users"]["max_daily_swaps"]                   = int(max_daily_swaps)
     cfg.setdefault("oracles", {})["oracle_reward_per_claim"] = float(oracle_reward_per_claim)
     cfg.setdefault("premium", {})["min_premium_pct"]         = float(min_premium_pct)
@@ -220,7 +240,10 @@ def _make_cfg(**kwargs) -> dict:
         sr_threshold_med=kwargs.get("sr_threshold_med", sr_threshold_med),
         initial_pool_balance=kwargs.get("initial_pool_balance", initial_pool_balance),
         n_synthetic_users=kwargs.get("n_synthetic_users", n_synthetic_users),
+        growth_rate_daily=kwargs.get("growth_rate_daily", growth_rate_daily),
         max_daily_swaps=kwargs.get("max_daily_swaps", max_daily_swaps),
+        swap_value_mean_eth=kwargs.get("swap_value_mean_eth", swap_value_mean_eth),
+        swap_value_sigma=kwargs.get("swap_value_sigma", swap_value_sigma),
         patt_override=kwargs.get("patt_override", patt_override),
         e_fnr=kwargs.get("e_fnr", e_fnr),
         fraud_claim_pct=kwargs.get("fraud_claim_pct", fraud_claim_pct),

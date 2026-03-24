@@ -6,6 +6,8 @@ simulation:
 
 market:
   patt_oscillation_range: 0.02
+  swap_value_mean_eth: 0.5    # media valore swap (log-normale)
+  swap_value_sigma: 0.4       # deviazione standard del log
 
 users:
   initial_count: 500
