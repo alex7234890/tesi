@@ -54,9 +54,12 @@ class SyntheticDataSource(BaseDataSource):
         self.loss_pct_std: float  = mc["loss_pct_std"]
         self.patt_osc: float      = mc["patt_oscillation_range"]
 
+        self.swap_value_mean: float  = float(mc.get("swap_value_mean_eth", 0.5))
+        self.swap_value_sigma: float = float(mc.get("swap_value_sigma", 0.4))
+
         uc = config["users"]
         self.initial_count: int       = uc["initial_count"]
-        self.growth_rate_daily: float = uc["growth_rate_daily"]
+        self.growth_rate_daily: float = float(uc.get("growth_rate_daily", 0.02))
         # Read swaps_per_day from simulation section first, fall back to users section
         self.swaps_per_day: int       = int(
             config.get("simulation", {}).get("swaps_per_day")
@@ -157,7 +160,10 @@ class SyntheticDataSource(BaseDataSource):
             uid  = user_ids[int(self.rng.integers(0, len(user_ids)))]
             user = self._users[uid]
 
-            value_eth   = float(np.clip(self.rng.lognormal(np.log(0.5), 0.4), 0.01, 50.0))
+            value_eth   = float(np.clip(
+                self.rng.lognormal(np.log(self.swap_value_mean), self.swap_value_sigma),
+                0.01, 50.0,
+            ))
             is_attacked = self.rng.random() < patt
 
             if is_attacked:
