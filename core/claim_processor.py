@@ -8,8 +8,8 @@ Oracle cost is computed separately in the runner.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import List, Optional
+from dataclasses import dataclass
+from typing import Optional
 
 from .pool import InsurancePool
 from datasources.base import Swap
@@ -27,11 +27,6 @@ class Claim:
     payout_eth: float
     decision: str = "approved"
     rejection_reason: Optional[str] = None
-    # kept for collector compatibility
-    fraud_score: int = 0
-    oracle_scores: List[int] = field(default_factory=list)
-    final_score: int = 0
-    user_tier: Optional[str] = None
 
 
 class ClaimProcessor:

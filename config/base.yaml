@@ -14,8 +14,6 @@ market:
 users:
   initial_count: 500
   growth_rate_daily: 0.02
-  fraud_rate: 0.05
-  fraud_strategy: "mixed"
   swaps_per_day: 100
   swap_frequency_mean: 3
   max_daily_swaps: 10
@@ -38,42 +36,7 @@ pool:
 premium:
   min_premium_pct: 0.015   # floor 1.5% applicato prima di Fcov
 
-fraud_detection:
-  user_fraud_rate: 0.05
-  oracle_dishonest_rate: 0.10
-  false_negative_rate: 0.20
-  claim_rate_thresholds:
-    very_suspicious: 0.30
-    suspicious_high: 0.20
-    suspicious_med: 0.10
-    normal: 0.06
-  fraud_score_decision:
-    auto_approve: 60
-    captcha_low: 60
-    captcha_high: 80
-    auto_reject: 80
-  network_bfs_scores:
-    distance_1: 50
-    distance_2: 30
-    distance_3: 15
-    no_path: 0
-
 oracles:
   initial_count: 20
-  honest_rate: 0.90
-  availability_rate: 0.95
   n_selected_per_claim: 5
-  stake_min_eth: 2.0
-  reward_per_claim_eth: 0.005
-  oracle_reward_per_claim: 0.002   # reward per oracle per claim (ex reward_patt_update_eth)
-  reward_captcha_eth: 0.001
-  watchlist:
-    entry_divergences: 2
-    divergence_threshold: 10
-    persistence_months: 3
-  slashing:
-    contestation_stake_eth: 0.1
-    distribution:
-      pool: 0.60
-      reporter: 0.25
-      jury: 0.15
+  oracle_reward_per_claim: 0.002
